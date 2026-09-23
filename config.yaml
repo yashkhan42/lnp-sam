@@ -1,0 +1,89 @@
+cleanup:
+  margin_std_max: 0.03        # a border row/col is margin if std below this...
+  margin_white: 0.92          # ...and mean above this
+  margin_black: 0.08          # ...or below this
+  margin_scan_max_frac: 0.25
+  ocr_upscale: 2              # 3 if min(H, W) < 300
+  ocr_conf_min: 0.3
+  text_h_frac: [0.015, 0.15]  # accepted text-box height, fraction of panel height
+  text_dilate_frac: 0.2       # dilation = max(2 px, frac * box height)
+  bar_bright: 0.85
+  bar_dark: 0.15
+  bar_min_len_frac: 0.03      # of panel width
+  bar_max_thick_frac: 0.04    # of panel height (3 px minimum allowed)
+  bar_min_thick: 3            # min bar thickness px; drops thin particle-rim streaks (LNP-SAM tuning of 5.3)
+  bar_min_aspect: 6
+  bar_flat_std_max: 0.03      # drawn bars are flat along their length
+  annot_box_fill_min: 0.90
+  annot_box_area_max_frac: 0.10
+  nm_per_px_range: [0.05, 200]
+  inpaint_radius: 5
+
+  # --- LNP-SAM v2 cleanup amendments (see LNP-SAM_MVP_SPEC_AMENDMENTS.md) ---
+  fill_method: texture         # A1: 'texture' (inpaint + matched background noise) | 'telea'
+  fill_noise_scale: 1.0        # A1: multiplier on the estimated background-noise sigma
+  bar_exclude_scope: furniture # A3: which detected bars enter the exclusion mask: 'furniture' | 'all'
+  annot_ocr_pure_bright: 0.90  # A2: an OCR-anchored label patch is pure-bright above this
+  annot_ocr_pure_dark: 0.15    # A2: ...or pure-dark below this
+  annot_grow_pad_frac: 0.7     # A2: bounded grow window = OCR box padded by this * box size
+  annot_grow_area_mult: 8      # A2: reject grown region if area > this * OCR-box area (fall back to padded box)
+  annot_dilate_px: 2           # A2: dilation of an accepted annotation box
+  burn_bar_pure_bright: 0.95   # A3: burned-in bar near-saturation (bright)
+  burn_bar_pure_dark: 0.05     # A3: burned-in bar near-saturation (dark)
+  burn_bar_std_max: 0.02       # A3: burned-in bars are ultra-flat along their length
+  burn_bar_edge_frac: 0.20     # A3: burned-in bars lie within this fraction of an image edge
+  burn_bar_max_thick_frac: 0.12 # A3: burned-in bars may be thicker than imaged particle rims
+  burn_bar_min_len_frac: 0.03  # A3: of panel width
+  burn_bar_min_thick: 3        # A3: a burned-in bar is a solid block, not a 1-px streak
+  burn_bar_contrast_min: 0.20  # A3: bar must contrast with the rows just above/below (rejects dark particle interiors)
+  bar_length_method: extent    # A4: 'extent' (full drawn width incl. serifs/anti-aliasing) | 'median' (original 5.3 step 3)
+  bar_dilate_px: 5             # A4: exclusion dilation around bars (removes faint seam lines)
+  geom_label_boxes: true       # A6: detect filled bright/dark label boxes without OCR (catches boxes OCR misses)
+  annot_box_area_min_frac: 0.002 # A6: min label-box area (fraction of panel) to avoid specks
+
+sam:
+  checkpoint: sam_vit_b_01ec64.pth
+  points_per_side: 64
+  points_per_batch: 128
+  pred_iou_thresh: 0.80       # NP-SAM: 0.88
+  stability_score_thresh: 0.85  # NP-SAM: 0.95
+  box_nms_thresh: 0.95        # NP-SAM: 0.7
+  min_piece_px: 4
+  excl_drop_frac: 0.5
+  bg_area_frac: 0.25
+
+graph:
+  dup_iou: 0.85
+  contain_frac: 0.90
+  contain_area_ratio: 1.10
+  adjacent_px: 2
+
+resolve:
+  seed: {solidity: 0.90, circularity: 0.75, quality: 0.85, min_d_px: 6, max_area_frac: 0.10, min_count: 3}
+  seed_relaxed: {circularity: 0.60, quality: 0.75}
+  polarity_prior: {TEM: -1, SEM: 1}   # -1: particles darker than background
+  dense_bg_min_frac: 0.05
+  rho_bg_max: 0.35
+  rho_particle_min: 0.50
+  rim_band_frac: 0.30
+  ring_width_frac: 0.25
+  gap_contact_min: 0.50
+  orphan: {circularity: 0.70, ring_free_min: 0.50, ring_rho_min: 0.60, ring_std_max: 0.25}
+  particle: {edge_min: 0.25, quality_min: 0.70, max_area_frac: 0.25}
+  min_particle_nm: 10         # PI to confirm
+  speck_rel_d: 0.20           # used when uncalibrated
+  split: {max_children: 3, r_min: 0.45, coverage_min: 0.70}
+  aggregate: {min_children: 3, coverage_min: 0.40}
+  cavity: {r_min: 0.25, r_max: 0.95, delta_max: 0.25, rho_margin: 0.15}
+  stacked: {r_min: 0.25, delta_min: 0.25, circularity: 0.80, rho_tol: 0.05}
+  spot_r_max: 0.25
+
+recover:
+  box_scales: [1.6, 2.2]
+  contain_min: 0.90
+  circularity_min: 0.70
+  ring_rho_min: 0.50
+  swallow_max: 0.50
+
+measure:
+  min_particles_for_stats: 5

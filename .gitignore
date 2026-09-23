@@ -1,0 +1,14 @@
+# Environments
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Run outputs
+runs/
+
+# SAM checkpoint (large; download separately per spec 4.1)
+sam_vit_b_01ec64.pth
+
+# OS
+.DS_Store
