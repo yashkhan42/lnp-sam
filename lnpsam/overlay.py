@@ -1,11 +1,13 @@
 """Overlays.
 
-The full particle overlay (spec 10.3) is part of Step 6 and is not implemented
-yet. :func:`cleanup_overlay` renders what Step 1 produced -- exclusion mask in red
-at 30%, the content box, and the calibration text -- for verifying stage 1.
+The full resolved-particle overlay (spec 10.3) is part of Step 6 and is not
+implemented yet. :func:`cleanup_overlay` renders Step 1, while
+:func:`proposal_overlay` draws every surviving Step-2 mask for proposal review.
 """
 
 from __future__ import annotations
+
+import hashlib
 
 import cv2
 import numpy as np
@@ -41,6 +43,44 @@ def cleanup_overlay(rgb_u8, result):
     cv2.putText(
         img, txt, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA
     )
+    return img
+
+
+def _panel_seed(panel_id):
+    """Stable random seed so proposal colors survive cached reruns unchanged."""
+    digest = hashlib.sha256(str(panel_id).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "little")
+
+
+def proposal_overlay(rgb_u8, nodes, panel_id, line_width=1):
+    """Draw every surviving Step-2 mask outline in a random RGB color.
+
+    Colors are random but deterministically seeded by ``panel_id`` so visual
+    comparisons are stable across cached and uncached runs. The original,
+    unfilled node mask is outlined in full-panel coordinates.
+    """
+    img = np.asarray(rgb_u8).copy()
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    if img.ndim != 3 or img.shape[2] != 3:
+        raise ValueError(f"rgb_u8 must have shape (H, W, 3), got {img.shape}")
+    if line_width < 1:
+        raise ValueError("line_width must be at least 1")
+
+    rng = np.random.default_rng(_panel_seed(panel_id))
+    for node in sorted(nodes, key=lambda item: item["node_id"]):
+        mask = np.asarray(node["mask"], dtype=np.uint8)
+        if mask.shape != img.shape[:2]:
+            raise ValueError(
+                f"node {node['node_id']} mask shape {mask.shape} does not match panel {img.shape[:2]}"
+            )
+        if not mask.any():
+            continue
+        # Keep colors away from black so outlines remain visible on dark TEM/SEM
+        # regions. OpenCV writes these values directly into our RGB array.
+        color = tuple(int(value) for value in rng.integers(64, 256, size=3))
+        contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(img, contours, -1, color, int(line_width), lineType=cv2.LINE_8)
     return img
 
 
