@@ -56,6 +56,7 @@ class CleanupResult:
     L_px: Optional[float] = None
     scale_value_nm: Optional[float] = None
     scale_text: Optional[str] = None
+    scale_box: Optional[tuple] = None
     ocr_boxes: list = field(default_factory=list)
     bars: list = field(default_factory=list)
     label_boxes: list = field(default_factory=list)
@@ -535,12 +536,54 @@ def detect_burned_in_bars(gray, cc):
 # --------------------------------------------------------------------------- #
 # 5.5 Calibration
 # --------------------------------------------------------------------------- #
+def scale_text_candidates(ocr_boxes, conf_min):
+    """Scale-label candidates: single OCR boxes plus same-line merged pairs.
+
+    EasyOCR groups words differently across platforms (e.g. Linux/CPU returns
+    "200" and "nm" as two boxes), so calibration must not depend on grouping. Two
+    boxes merge into one candidate when their vertical centres are within 0.5x the
+    taller box's height and the horizontal gap between them is <= 1.5x that height;
+    the merged text is left-to-right concatenation and the merged box is the union.
+    Each candidate is ``{"text", "box" (x0,y0,x1,y1), "single"}``.
+    """
+    boxes = [b for b in ocr_boxes if b["conf"] >= conf_min]
+    candidates = [
+        {"text": b["text"], "box": tuple(int(v) for v in b["box"]), "single": True}
+        for b in boxes
+    ]
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            a, b = boxes[i], boxes[j]
+            left, right = (a, b) if a["box"][0] <= b["box"][0] else (b, a)
+            lx0, ly0, lx1, ly1 = left["box"]
+            rx0, ry0, rx1, ry1 = right["box"]
+            taller = max(ly1 - ly0, ry1 - ry0)
+            if taller <= 0:
+                continue
+            # Same text line: vertical centres close.
+            if abs(0.5 * (ly0 + ly1) - 0.5 * (ry0 + ry1)) > 0.5 * taller:
+                continue
+            # Horizontally adjacent: gap between them small (may overlap).
+            if (rx0 - lx1) > 1.5 * taller:
+                continue
+            candidates.append(
+                {
+                    "text": left["text"] + right["text"],
+                    "box": (min(lx0, rx0), min(ly0, ry0), max(lx1, rx1), max(ly1, ry1)),
+                    "single": False,
+                }
+            )
+    return candidates
+
+
 def calibrate(ocr_boxes, bars, cc, manifest_nm_per_px=None):
     """Spec 5.5: pair a scale label with a bar and derive ``nm_per_px``.
 
     Priority: manifest override > auto > missing. Returns
-    ``(nm_per_px, cal_source, L_px, value_nm, scale_text, cal_bar)`` where
-    ``cal_bar`` is the paired bar dict (or ``None``); it is excluded in 5.6.
+    ``(nm_per_px, cal_source, L_px, value_nm, scale_text, cal_bar, scale_box)``
+    where ``cal_bar`` is the paired bar dict and ``scale_box`` is the label's
+    (possibly merged) box; both are excluded in 5.6. A single-box match is
+    preferred over a merged one when both are valid.
     """
     lo, hi = cc["nm_per_px_range"]
 
@@ -548,20 +591,18 @@ def calibrate(ocr_boxes, bars, cc, manifest_nm_per_px=None):
     if manifest_nm_per_px is not None and not (
         isinstance(manifest_nm_per_px, float) and math.isnan(manifest_nm_per_px)
     ):
-        return float(manifest_nm_per_px), "manual", None, None, None, None
+        return float(manifest_nm_per_px), "manual", None, None, None, None, None
 
-    # Candidate scale labels (OCR text matching the regex).
+    # Candidate scale labels (single boxes + same-line merges) matching the regex.
     labels = []
-    for b in ocr_boxes:
-        if b["conf"] < cc["ocr_conf_min"]:
-            continue
-        value_nm = parse_scale_label(b["text"])
+    for cand in scale_text_candidates(ocr_boxes, cc["ocr_conf_min"]):
+        value_nm = parse_scale_label(cand["text"])
         if value_nm is not None:
-            labels.append((b, value_nm))
+            labels.append((cand, value_nm))
 
-    best = None  # (overlap, nm_per_px, L_px, value_nm, text, bar)
-    for b, value_nm in labels:
-        lx0, ly0, lx1, ly1 = b["box"]
+    best = None  # (key, nm_per_px, L_px, value_nm, text, bar, box)
+    for cand, value_nm in labels:
+        lx0, ly0, lx1, ly1 = cand["box"]
         lh = ly1 - ly0
         lcx = 0.5 * (lx0 + lx1)
 
@@ -585,13 +626,18 @@ def calibrate(ocr_boxes, bars, cc, manifest_nm_per_px=None):
         nm_per_px = value_nm / candidate_bar["L_px"]
         if not (lo <= nm_per_px <= hi):
             continue
-        if best is None or best_overlap > best[0]:
-            best = (best_overlap, nm_per_px, candidate_bar["L_px"], value_nm, b["text"], candidate_bar)
+        # Prefer a single-box match; then the bar with the largest overlap.
+        key = (0 if cand["single"] else 1, -best_overlap)
+        if best is None or key < best[0]:
+            best = (
+                key, nm_per_px, candidate_bar["L_px"], value_nm,
+                cand["text"], candidate_bar, cand["box"],
+            )
 
     if best is None:
-        return None, "missing", None, None, None, None
-    _, nm_per_px, L_px, value_nm, text, bar = best
-    return float(nm_per_px), "auto", float(L_px), float(value_nm), text, bar
+        return None, "missing", None, None, None, None, None
+    _, nm_per_px, L_px, value_nm, text, bar, box = best
+    return float(nm_per_px), "auto", float(L_px), float(value_nm), text, bar, box
 
 
 # --------------------------------------------------------------------------- #
@@ -671,9 +717,15 @@ def run_cleanup(gray, rgb_u8, modality, cfg, reader=None, manifest_nm_per_px=Non
     burned_bars = detect_burned_in_bars(gray, cc)
 
     # 5.5 Calibration (before bar exclusion: it names the bar to exclude).
-    nm_per_px, cal_source, L_px, value_nm, scale_text, cal_bar = calibrate(
+    nm_per_px, cal_source, L_px, value_nm, scale_text, cal_bar, scale_box = calibrate(
         ocr_boxes, bars, cc, manifest_nm_per_px
     )
+    # Exclude the (possibly merged) scale-label box so the whole label is removed
+    # even when EasyOCR split it into separate word boxes (some of which may fail
+    # the 5.2 keep filter).
+    if scale_box is not None:
+        d = max(2, cc["text_dilate_frac"] * (scale_box[3] - scale_box[1]))
+        _add_box_dilated(exclusion, scale_box, d, H, W)
 
     # A3: only furniture bars enter the exclusion (burned-in + the calibration
     # bar), so imaged particle rims are not masked. 'all' restores §5.3 step 4.
@@ -721,6 +773,7 @@ def run_cleanup(gray, rgb_u8, modality, cfg, reader=None, manifest_nm_per_px=Non
         L_px=L_px,
         scale_value_nm=value_nm,
         scale_text=scale_text,
+        scale_box=scale_box,
         ocr_boxes=ocr_boxes,
         bars=bars,
         label_boxes=label_boxes,

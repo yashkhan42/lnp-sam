@@ -230,7 +230,8 @@ Filled rectangles behind panel letters (e.g. the white "a" box in every `wang201
 
 1. Normalize OCR text: remove spaces; inside digit runs map `O→0`, `l→1`, `I→1`, `,→.`.
 2. Scale label regex (case-insensitive): `^(\d+(?:\.\d+)?)(nm|um|µm|μm|jm|pm)$`. Units to nm: `nm` → 1; `um`, `µm`, `μm`, `jm` → 1000; `pm` → 1000 (OCR usually misreads µm as pm; the plausibility check catches the rest).
-3. Pair each label with the bar whose vertical gap to it ≤ 3 label heights and whose center is within `0.75 × L_px` horizontally; if several bars qualify, take the one with the largest horizontal overlap with the label.
+   - **Label candidates (v2).** Because EasyOCR groups words differently across platforms (e.g. Linux/CPU returns `200` and `nm` as two boxes), build candidates from single OCR boxes **and** same-line merged pairs — two boxes whose vertical centres are within `0.5 ×` the taller box's height and whose horizontal gap is `≤ 1.5 ×` that height, concatenated left-to-right, with the union as the candidate box. Parse both; prefer a single-box match when both are valid. The candidate (merged union) box anchors bar pairing and is added to the exclusion.
+3. Pair each candidate label with the bar whose vertical gap to it ≤ 3 label heights and whose center is within `0.75 × L_px` horizontally; if several bars qualify, take the one with the largest horizontal overlap with the label.
 4. `nm_per_px = value_nm / L_px`. Reject if outside `nm_per_px_range`. Record the paired bar; it is the calibration bar excluded in 5.3 step 4 (v2).
 5. Priority: manifest `nm_per_px` > auto > missing. Record `cal_source` ∈ {`manual`, `auto`, `missing`}. If missing, everything runs in px and nm columns are empty.
 

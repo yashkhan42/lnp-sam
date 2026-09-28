@@ -8,7 +8,7 @@ from lnpsam import io as lnp_io
 from lnpsam import run as run_mod
 
 
-def test_steps_1_and_2_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch):
+def test_steps_1_to_3_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch):
     image_path = tmp_path / "panel.png"
     Image.new("RGB", (40, 40), (128, 128, 128)).save(image_path)
     manifest_path = tmp_path / "manifest.csv"
@@ -36,7 +36,7 @@ def test_steps_1_and_2_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch
         def readtext(self, *args, **kwargs):
             return []
 
-    calls = {"load": 0, "generate": 0}
+    calls = {"load": 0, "generate": 0, "graph": 0}
 
     class FakeGenerator:
         def generate(self, image):
@@ -62,16 +62,33 @@ def test_steps_1_and_2_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch
         "make_mask_generator",
         lambda *args, **kwargs: FakeGenerator(),
     )
+    real_run_graph = run_mod.graph_mod.run_graph
+
+    def tracked_run_graph(*args, **kwargs):
+        calls["graph"] += 1
+        return real_run_graph(*args, **kwargs)
+
+    monkeypatch.setattr(run_mod.graph_mod, "run_graph", tracked_run_graph)
 
     out_dir = tmp_path / "run"
     run_mod.run_cleanup_stage(
-        manifest_path, config_path, out_dir, run_step2=True, device="cpu"
+        manifest_path,
+        config_path,
+        out_dir,
+        run_step2=True,
+        run_step3=True,
+        device="cpu",
     )
     run_mod.run_cleanup_stage(
-        manifest_path, config_path, out_dir, run_step2=True, device="cpu"
+        manifest_path,
+        config_path,
+        out_dir,
+        run_step2=True,
+        run_step3=True,
+        device="cpu",
     )
 
-    assert calls == {"load": 1, "generate": 1}
+    assert calls == {"load": 1, "generate": 1, "graph": 2}
     assert (out_dir / "proposals" / "toy_panel__nodes.parquet").is_file()
     assert (out_dir / "proposals" / "toy_panel__meta.json").is_file()
     assert (out_dir / "proposals" / "toy_panel__overlay.png").is_file()

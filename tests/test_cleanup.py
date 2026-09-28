@@ -98,13 +98,74 @@ def test_parse_scale_label_rejects_nonscale():
 # 5.5 manual calibration override (no OCR)
 # --------------------------------------------------------------------------- #
 def test_manual_calibration_override():
-    nm, src, L, val, txt, bar = cl.calibrate([], [], CC, manifest_nm_per_px=2.5)
+    nm, src, L, val, txt, bar, box = cl.calibrate([], [], CC, manifest_nm_per_px=2.5)
     assert src == "manual" and nm == 2.5
 
 
 def test_missing_calibration():
-    nm, src, L, val, txt, bar = cl.calibrate([], [], CC, manifest_nm_per_px=float("nan"))
+    nm, src, L, val, txt, bar, box = cl.calibrate([], [], CC, manifest_nm_per_px=float("nan"))
     assert src == "missing" and nm is None
+
+
+# --------------------------------------------------------------------------- #
+# 5.5 calibration is robust to how EasyOCR groups words (no OCR call)
+# --------------------------------------------------------------------------- #
+def _ocr_box(text, box, conf=0.9):
+    x0, y0, x1, y1 = box
+    return {
+        "text": text,
+        "text_norm": cl.normalize_scale_text(text),
+        "conf": conf,
+        "box": (x0, y0, x1, y1),
+        "height": y1 - y0,
+        "keep": True,
+    }
+
+
+def _fake_bar(x0, x1, y0, y1, L_px):
+    return {
+        "polarity": "dark",
+        "y0": y0,
+        "y1": y1,
+        "x0": x0,
+        "x1": x1,
+        "x_center": 0.5 * (x0 + x1),
+        "L_px": float(L_px),
+        "longest": x1 - x0,
+        "rows": [],
+        "spans": [],
+    }
+
+
+def test_calibrate_merges_split_ocr_boxes():
+    """'200' and 'nm' as separate side-by-side boxes still calibrate (auto)."""
+    boxes = [_ocr_box("200", (100, 180, 130, 200)), _ocr_box("nm", (135, 182, 160, 200))]
+    bar = _fake_bar(100, 160, 205, 208, 60)
+    nm, src, L, val, txt, cbar, box = cl.calibrate(boxes, [bar], CC)
+    assert src == "auto"
+    assert abs(nm - 200.0 / 60.0) / (200.0 / 60.0) <= 0.02
+    assert val == 200.0
+    assert box == (100, 180, 160, 200)  # merged union box (used for exclusion)
+
+
+def test_calibrate_does_not_merge_distant_or_multiline_boxes():
+    bar = _fake_bar(100, 160, 205, 208, 60)
+    far = [_ocr_box("200", (100, 180, 130, 200)), _ocr_box("nm", (300, 182, 325, 200))]
+    assert cl.calibrate(far, [bar], CC)[1] == "missing"
+    multiline = [_ocr_box("200", (100, 180, 130, 200)), _ocr_box("nm", (100, 240, 130, 258))]
+    assert cl.calibrate(multiline, [bar], CC)[1] == "missing"
+
+
+def test_calibrate_prefers_single_box_when_both_valid():
+    """A single '200nm' box wins over any merged candidate."""
+    boxes = [
+        _ocr_box("200nm", (100, 180, 165, 200)),
+        _ocr_box("nm", (168, 182, 190, 200)),
+    ]
+    bar = _fake_bar(100, 165, 205, 208, 65)
+    nm, src, L, val, txt, cbar, box = cl.calibrate(boxes, [bar], CC)
+    assert src == "auto"
+    assert box == (100, 180, 165, 200)  # the single box, not a merge
 
 
 # --------------------------------------------------------------------------- #
@@ -140,7 +201,9 @@ def test_scale_bar_and_text_calibration():
     # Bar pixels are inside the exclusion mask.
     assert res.exclusion[196:199, 150:210].all()
 
-    # The scale-label OCR box is inside the exclusion mask.
-    label = next(b for b in res.ocr_boxes if cl.parse_scale_label(b["text"]) is not None)
-    lx0, ly0, lx1, ly1 = label["box"]
+    # The scale-label box is inside the exclusion mask. Use res.scale_box (the
+    # merged union box) so this holds whether EasyOCR returns "200 nm" as one box
+    # or splits it into "200" and "nm".
+    assert res.scale_box is not None
+    lx0, ly0, lx1, ly1 = res.scale_box
     assert res.exclusion[ly0:ly1, lx0:lx1].mean() > 0.5

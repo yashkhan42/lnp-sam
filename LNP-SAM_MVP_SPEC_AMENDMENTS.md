@@ -209,6 +209,30 @@ calibrations are unchanged (girard 1.852, wang 2.404, pylypchuk2020 1.190).
 
 ---
 
+## 4e. Amendment A7 — calibration robust to EasyOCR word grouping (augments §5.5)
+
+**B7 (calibration fails on some platforms).** EasyOCR groups words differently by
+platform/backend: on Linux/CPU (the HPC) it returns `"200"` and `"nm"` as two separate
+boxes. `calibrate()` parsed each box alone against the scale regex, so neither matched
+and `cal_source` came back `missing` — `test_scale_bar_and_text_calibration` failed on
+HPC though it passed on macOS.
+
+**Amendment (no `readtext` change).** Before parsing, `calibrate()` builds candidates
+from single OCR boxes **and same-line merged pairs**: two boxes merge when their vertical
+centres are within `0.5 ×` the taller box's height and the horizontal gap between them is
+`≤ 1.5 ×` that height, concatenated left-to-right, with the union box as the candidate.
+Single and merged candidates are parsed with the existing `normalize_scale_text` /
+`parse_scale_label`; a single-box match is preferred when both are valid. The chosen
+candidate's (merged union) box anchors the bar pairing and is added to the exclusion, so
+a split label is fully removed even if a sub-box fails the §5.2 keep filter.
+
+**Effect.** Calibration no longer depends on OCR word grouping. New deterministic tests
+(no OCR call) cover the split-box merge (`nm_per_px` within 2 %, `cal_source == "auto"`),
+a single-box-preferred case, and negatives (boxes far apart or on different lines do not
+merge). `readtext` parameters are unchanged.
+
+---
+
 ## 5. New `config.yaml` parameters (all under `cleanup:`)
 
 | Param | Default | Amendment | Meaning |

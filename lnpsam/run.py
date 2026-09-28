@@ -2,9 +2,10 @@
 
     python -m lnpsam.run --manifest data/manifest.csv --config config.yaml --out runs/<name>
 
-This runs Step 1 (Cleanup, spec 5) and Step 2 (Proposals, spec 6) for every panel.
-Step-2 nodes are cached per panel and SAM is skipped when every consumed input is
-unchanged. Steps 3-6 are not implemented yet.
+This runs Step 1 (Cleanup, spec 5), Step 2 (Proposals, spec 6), and Step 3
+(Graph, spec 7) for every panel. Step-2 nodes are cached per panel and SAM is
+skipped when every consumed input is unchanged. Steps 4-6 are not implemented
+yet.
 """
 
 from __future__ import annotations
@@ -18,12 +19,13 @@ import numpy as np
 import pandas as pd
 
 from . import cleanup as cleanup_mod
+from . import graph as graph_mod
 from . import io as lnp_io
 from . import overlay as overlay_mod
 from . import proposals as proposals_mod
 
 # Pipeline steps that exist as stubs; presence here documents what is pending.
-_PENDING_STEPS = ("graph", "resolve", "recover", "measure")
+_PENDING_STEPS = ("resolve", "recover", "measure")
 
 
 def _write_png(path, rgb_u8):
@@ -31,8 +33,17 @@ def _write_png(path, rgb_u8):
     cv2.imwrite(path, cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR))
 
 
-def run_cleanup_stage(manifest_path, config_path, out_dir, run_step2=False, device="auto"):
-    """Run Step 1, optionally followed by cached Step 2, for every panel."""
+def run_cleanup_stage(
+    manifest_path,
+    config_path,
+    out_dir,
+    run_step2=False,
+    run_step3=False,
+    device="auto",
+):
+    """Run Step 1, optionally followed by cached Step 2 and Step 3."""
+    if run_step3 and not run_step2:
+        raise ValueError("Step 3 requires Step 2 nodes; set run_step2=True")
     cfg = lnp_io.load_config(config_path)
     manifest = lnp_io.load_manifest(manifest_path)
 
@@ -157,6 +168,25 @@ def run_cleanup_stage(manifest_path, config_path, out_dir, run_step2=False, devi
                 }
             )
 
+            if run_step3:
+                graph_result = graph_mod.run_graph(nodes, cfg)
+                duplicate_count = len(nodes) - len(graph_result.representative_ids)
+                adjacency_count = sum(
+                    len(node["adjacent"])
+                    for node in graph_result.nodes
+                    if node["is_representative"]
+                ) // 2
+                parent_count = sum(
+                    node["parent"] is not None
+                    for node in graph_result.nodes
+                    if node["is_representative"]
+                )
+                print(
+                    f"    graph: representatives={len(graph_result.representative_ids)}, "
+                    f"duplicates={duplicate_count}, parents={parent_count}, "
+                    f"adjacencies={adjacency_count}"
+                )
+
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(cleanup_dir, "cleanup_all.csv"), index=False)
     if run_step2:
@@ -181,16 +211,18 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     print(f"[lnpsam] Step 1: Cleanup -> {os.path.join(args.out, 'cleanup')}")
     print(f"[lnpsam] Step 2: Proposals -> {os.path.join(args.out, 'proposals')}")
+    print("[lnpsam] Step 3: Graph")
     run_cleanup_stage(
         args.manifest,
         args.config,
         args.out,
         run_step2=True,
+        run_step3=True,
         device=args.device,
     )
     print(
-        f"[lnpsam] Steps 1-2 complete. Steps not yet implemented: "
-        f"{', '.join(_PENDING_STEPS)} (stages 3-6)."
+        f"[lnpsam] Steps 1-3 complete. Steps not yet implemented: "
+        f"{', '.join(_PENDING_STEPS)} (stages 4-6)."
     )
 
 
