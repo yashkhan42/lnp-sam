@@ -62,6 +62,8 @@ resolve:
   seed: {solidity: 0.90, circularity: 0.75, quality: 0.85, min_d_px: 6, max_area_frac: 0.10, min_count: 3}
   seed_relaxed: {circularity: 0.60, quality: 0.75}
   polarity_prior: {TEM: -1, SEM: 1}   # -1: particles darker than background
+  seed_polarity_check: true   # 8.1 (v3 A): seeds must lie on the polarity_prior side of mu_bg
+  bg_rules_use: pl            # 8.3 (v3 B): R-BGPATCH tests 'pl' (rim included) | 'rho_in' (original)
   dense_bg_min_frac: 0.05
   rho_bg_max: 0.35
   rho_particle_min: 0.50
@@ -70,11 +72,14 @@ resolve:
   gap_contact_min: 0.50
   orphan: {circularity: 0.70, ring_free_min: 0.50, ring_rho_min: 0.60, ring_std_max: 0.25}
   particle: {edge_min: 0.25, quality_min: 0.70, max_area_frac: 0.25}
+  large_round: {enabled: true, circularity: 0.75, solidity: 0.90}  # 8.3 (v3 D): large round solid mask -> particle, not R-LARGE
+  frame_particle: true        # 8.1 (v3 F): round solid bg_candidate on the particle side is a particle, not background
   min_particle_nm: 10         # PI to confirm
   speck_rel_d: 0.20           # used when uncalibrated
   split: {max_children: 3, r_min: 0.45, coverage_min: 0.70}
   aggregate: {min_children: 3, coverage_min: 0.40}
-  cavity: {r_min: 0.25, r_max: 0.95, delta_max: 0.25, rho_margin: 0.15}
+  group_members_only: true    # 8.4 (v3 C): C-SPLIT/C-AGG count only particle-like children >= d_min
+  cavity: {rule: single_hole, r_min: 0.25, r_max: 0.95, delta_max: 0.25, rho_margin: 0.15}  # 8.4 (v3 E): 'single_hole' | 'size' (original)
   stacked: {r_min: 0.25, delta_min: 0.25, circularity: 0.80, rho_tol: 0.05}
   spot_r_max: 0.25
 

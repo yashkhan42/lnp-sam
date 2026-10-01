@@ -7,7 +7,8 @@ validation numbers and references. Where an amendment changes the behaviour of a
 numbered section, that section is named. All new thresholds live in `config.yaml` under
 `cleanup:` (per spec §4.4).
 
-**Scope of this revision.** Step 1 (Cleanup, §5) only. Steps 2–6 are unchanged.
+**Scope of this revision.** v2 (§1–9 below): Step 1 (Cleanup, §5) only. v3 (§10–11):
+Step 4 (Resolve, §8) and the golden-set scope (§1, §12).
 
 ---
 
@@ -331,3 +332,60 @@ scale_text, cal_bar)`; the two calibration unit tests were updated accordingly.
   region. https://github.com/kleinerELM/remove_SEM_scalebar
 - Ⓡ5 LLM-assisted scale-bar detection & extraction for SEM, arXiv:2510.11260.
   https://arxiv.org/html/2510.11260
+
+---
+
+## 10. v3 — Step 4 (Resolve) amendments (changes §8.1, §8.3, §8.4)
+
+**How found.** Step 4 was first implemented exactly as §8 is written (`lnpsam/resolve.py`
+with every v3 switch off), then run on all golden panels from the cached HPC Step-2
+proposals (no SAM rerun; Steps 1, 3, 4 run locally). Overlays were checked against the
+source images. Review outputs: `runs/step4_review/` (spec as written),
+`runs/step4_review_v3f/` (with v3, A–F). Each amendment below has a config switch under
+`resolve:` that restores the original rule, and a unit test that checks both settings
+(`tests/test_resolve.py`).
+
+| # | Defect (observed) | Panel(s) | Root cause | Amendment | Switch |
+|---|---|---|---|---|---|
+| A | Every sphere on the control panel typed `bg_patch`; on pylypchuk2021 panel02 the dark gap between spheres typed `particle` | pylypchuk2020 p05 panel02 (control); pylypchuk2021 p05 panel02, panel04 | §8.1 seeds need only be isolated and round. On clustered/dense panels every sphere has a parent (the cluster mask), so the only seeds are pores or round background holes; `mu_p` lands on the background side and ρ inverts (control: `mu_p` 0.49 > `mu_bg` 0.45 on TEM) | Seeds must satisfy `s·(mean_int − mu_bg) > 0`; `mu_bg` is computed first (it never used seeds) | `seed_polarity_check` |
+| B | Sphere with a bright rim and a background-level interior typed `bg_patch` | pylypchuk2021 p05 panel19 (rho_in −0.01, rim 0.71) | §8.3 R-BGPATCH tests `rho_in` before R-PARTICLE tests `pl`, defeating §8.2's stated purpose for `pl` | R-BGPATCH tests `pl`. R-GAP keeps `rho_in`: testing `pl` there turned real gaps into particles (panel17 node 41, panel02 node 31: gap outlines borrow the neighbours' bright edges, contact 0.73–1.0) | `bg_rules_use` |
+| C | Single spheres typed `aggregate` (7 on xiong2020 panel02); a 4-sphere outline kept as one `particle` whose enclosed gap became its "cavity" | xiong2020 p02 panel02; pylypchuk2021 p05 panel17 | §8.4 group rules count children of any size and kind: 4–26 px specks became aggregate members; the gap a hole-filled merged outline encloses failed "all particle-like" and blocked C-SPLIT | Group rules count only particle-like children with `eqdiam ≥ d_min`; coverage over those; other children neither count nor block; after a split every child is retyped as a root | `group_members_only` |
+| D | Close-up single spheres typed `aggregate` | pylypchuk2021 p05 panel04, panel19 | §8.3 R-LARGE: any mask above 25 % of the content area is an aggregate | New R-PARTICLE-LARGE before R-LARGE: a large mask with circularity ≥ 0.75 and solidity ≥ 0.90 is one particle | `large_round.enabled` |
+| E | Hollow SEM spheres with a small central opening reported not hollow; solid SEM spheres with edge brightening reported hollow | pylypchuk2021 p05 panel01, 04, 19, 00 (openings 12–22 % of diameter → `spot`); p05 panel11 (false cavities, rho_in 1.1–1.3) | §8.4 C-CAVITY needs `r ≥ 0.25` and only a *relative* darkness test (vs the shell) | Hollow = exactly one hole near the centre (`δ ≤ 0.25`), any size from `d_min`; a hole is background-dark (`rho_in < rho_particle_min`) and darker than the shell; overlapping masks of one hole count once; speck-sized hole-like children do not count; all other hole-like children are spots (`C-HOLE-SPOT`). Domain rule confirmed by the user: a single, approximately central hole shows hollowness; several holes or an off-centre one are spots | `cavity.rule` (`single_hole` / `size`) |
+| F | A sphere filling the frame typed `background` (the panel had no measurable particle) | pylypchuk2021 p06_x50 panel04 | §6.2.5 flags `bg_candidate` by size and edge contact only; the flagged sphere is never a parent (§7.3), is left out of the background estimate (`mu_bg` 0.53 instead of ~0.44), and then passes R-BG | §8.1 step 0: a round, solid `bg_candidate` whose own pixels lie on the particle side of the rest of the content is not background; its flag is cleared and the graph rebuilt (in Step 4, after the Step-2 cache: no SAM rerun). Fires on 1 of 18 `bg_candidate` masks across the 16 panels with cached proposals: only this sphere. The tracking panel's background mask is round and solid once hole-filled (0.76 / 1.00) but on the background side; two candidates on the particle side (pylypchuk2021 panel02's cluster mask, one on wang) are not round. Re-running all 13 panels changes exactly one node: this sphere, `background` → truncated `particle` (R-PARTICLE-LARGE) | `frame_particle` |
+
+**Validation (12 gating + 1 tracking panels, `runs/step4_review_v3f/`).**
+
+| Check | Spec as written | v3 |
+|---|---|---|
+| Control (pylypchuk2020 panel02): particles | 0 (all `bg_patch`) | **15** |
+| pylypchuk2021 panel02: gap between spheres | `particle` | **`gap`** (criterion 2) |
+| pylypchuk2021 panel17: interstitial gap | inside a 4-sphere "particle" | **`gap`**; outline `merged` into its spheres |
+| Edge-pore panels 01 / 04 / 19: outer particle, pore | panel04/19 sphere `bg_patch` | **truncated `particle`, pore `cavity`** (criterion 3) |
+| Hollow spheres with one centred opening (panels 01, 04, 19, 00) | 2 of 7 hollow | **7 of 7** |
+| panel11: solid spheres reported hollow (edge brightening) | 2 | **0** |
+| False aggregates on single core-shell spheres (xiong2020 panel02, now deferred) | 7 | 0 |
+| p06_x50 panel04: frame-filling sphere | `background` | **truncated `particle`** (F) |
+| Unit tests | 11 (Step 4) | **23** (Step 4), 68 total |
+
+**Known Step-4 limitations not addressed by v3** (reported, not fixed):
+- Tracking panel `p05_x46__panel00`: SAM proposes no whole-cluster mask, so Step 4 cannot
+  form the aggregate (criterion 7 needs a proposal-level change).
+- `pylypchuk2021 p05 panel02`: the only seeds are tiny bright specks, so `mu_p` ≈ `mu_bg`
+  (0.38 vs 0.36); roles come out right, but ρ thresholds carry little meaning there.
+- A two-sphere SAM mask with no inner masks (panel17 node 3) is one `particle`: Step 4
+  cannot split what SAM did not outline.
+- Step-1 miss on `p05_x46__panel19`: the "300 nm" scale text is not excluded, so its
+  glyphs become particles (criterion 1).
+
+## 11. v3 — scope: transparent TEM particles deferred (changes §1, §12)
+
+The three xiong panels `xiong2020…p02_x12__panel02`, `…panel03` and
+`xiong2017…p02_x145__panel04` show near-transparent TEM particles (advanced TEM imaging):
+the light interiors are particle material, not cavities. Mask-based hollowness reads
+them as hollow, and classifying them reliably needs a different approach. Per the user,
+the MVP covers only particles with clear solidity (SEM and TEM). These panels move to a
+*deferred* list in §12.1 and out of `data/manifest.csv`; `xiong2020…panel00` (opaque
+spheres) stays. The gating set becomes 12 panels and criterion 6 keeps its ~73 % bar,
+rounded up: **9 of 12** (was 11 of 15). Criterion 4 now refers to the hollow/cored
+panels that remain (edge-pore panels, girard2024).

@@ -8,7 +8,7 @@ from lnpsam import io as lnp_io
 from lnpsam import run as run_mod
 
 
-def test_steps_1_to_3_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch):
+def test_steps_1_to_4_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch):
     image_path = tmp_path / "panel.png"
     Image.new("RGB", (40, 40), (128, 128, 128)).save(image_path)
     manifest_path = tmp_path / "manifest.csv"
@@ -77,6 +77,7 @@ def test_steps_1_to_3_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch)
         out_dir,
         run_step2=True,
         run_step3=True,
+        run_step4=True,
         device="cpu",
     )
     run_mod.run_cleanup_stage(
@@ -85,6 +86,7 @@ def test_steps_1_to_3_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch)
         out_dir,
         run_step2=True,
         run_step3=True,
+        run_step4=True,
         device="cpu",
     )
 
@@ -96,3 +98,13 @@ def test_steps_1_to_3_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch)
     assert bool(summary.loc[0, "cache_hit"])
     assert summary.loc[0, "device"] == "cpu"
     assert summary.loc[0, "overlay_path"].endswith("toy_panel__overlay.png")
+    for name in (
+        "toy_panel__roles.csv",
+        "toy_panel__panel.json",
+        "toy_panel__overlay.png",
+        "toy_panel__overlay_ids.png",
+    ):
+        assert (out_dir / "resolve" / name).is_file()
+    roles = pd.read_csv(out_dir / "resolve" / "toy_panel__roles.csv")
+    assert roles["role"].notna().all() and roles["rule_id"].notna().all()
+    assert (out_dir / "resolve" / "resolve_all.csv").is_file()

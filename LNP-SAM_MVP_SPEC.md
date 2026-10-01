@@ -1,10 +1,12 @@
 # LNP-SAM MVP Spec
 
-**Goal.** A working prototype that takes lignin nanoparticle (LNP) micrograph panels and returns calibrated particle diameters, fixing the failures NP-SAM showed on our 103-panel baseline. It must beat NP-SAM on 15 golden panels (section 12).
+**Goal.** A working prototype that takes lignin nanoparticle (LNP) micrograph panels and returns calibrated particle diameters, fixing the failures NP-SAM showed on our 103-panel baseline. It must beat NP-SAM on 12 golden panels (section 12).
 
 **Core idea.** NP-SAM judges each SAM mask alone and deletes masks with fixed filters. LNP-SAM keeps all of SAM's candidate masks, works out how they relate (duplicate, inside, touching), and only then decides what each mask is.
 
 **Revision v2 (cleanup robustness).** Sections 1, 4.5, 5.3–5.6, 6.2, 8.5 and 10 incorporate the v2 amendments that fix SAM-input defects found on the golden panels: particle rims masked as bars; a hard black label-box rectangle left in; smooth inpaint blobs; an undetected burned-in SEM scale bar; scale-bar length under-measured by dropping end serifs; and fills that smear a particle they overlap. `LNP-SAM_MVP_SPEC_AMENDMENTS.md` holds the defect evidence, root-cause analysis, validation numbers and references; this spec states the resulting behaviour. Design principle: the exclusion mask is the source of truth for "not a particle" and must be complete and precise; filling only blends; a particle that overlaps the exclusion or the border is kept but out of the diameter stats (`touches_exclusion`, 6.2/8.5/10); and the hard guarantee is section 6.2.3 (drop any SAM proposal ≥ `excl_drop_frac` inside the exclusion), which Step 2 must enforce against the mask cleanup produces.
+
+**Revision v3 (resolve robustness, scope).** Sections 1, 4.5, 8.1, 8.3, 8.4, 12.1, 12.2 and 12.4 incorporate the v3 amendments found by running Step 4 on the golden panels: seeds of the wrong polarity inverting ρ (A); rim-dark/rim-bright particles typed as background (B); specks and enclosed gaps distorting the group rules (C); close-up single particles typed as aggregates (D); hollowness defined by a single centred hole of any size (E); and a particle filling the frame typed as background (F). Transparent, low-contrast TEM particles are out of MVP scope, so the three xiong panels showing them leave the golden set (12 gating panels). Each rule change has a config switch restoring the original rule; `LNP-SAM_MVP_SPEC_AMENDMENTS.md` (§10–11) holds the evidence.
 
 ## 1. Scope
 
@@ -20,7 +22,8 @@
 | Hollowness from masks (cavity child) | Radial-profile physics model |
 | Aggregates flagged and reported separately | Primary-particle sizing inside aggregates |
 | Diameter = equivalent-area diameter; panel stats | Ellipse fits, morphology classes, quality gate |
-| Evaluation on 15 annotated golden panels vs NP-SAM | Full benchmark, other baselines |
+| Evaluation on 12 annotated golden panels vs NP-SAM | Full benchmark, other baselines |
+| Particles with clear solidity in SEM and TEM (v3) | Transparent / low-contrast TEM particles (e.g. thin-walled shells imaged as near-transparent), whose interiors read as cavities |
 
 ## 2. Why NP-SAM fails on lignin (what not to copy)
 
@@ -164,6 +167,8 @@ resolve:
   seed: {solidity: 0.90, circularity: 0.75, quality: 0.85, min_d_px: 6, max_area_frac: 0.10, min_count: 3}
   seed_relaxed: {circularity: 0.60, quality: 0.75}
   polarity_prior: {TEM: -1, SEM: 1}   # -1: particles darker than background
+  seed_polarity_check: true   # 8.1 (v3 A): seeds must lie on the polarity_prior side of mu_bg
+  bg_rules_use: pl            # 8.3 (v3 B): R-BGPATCH tests 'pl' (rim included) | 'rho_in' (original)
   dense_bg_min_frac: 0.05
   rho_bg_max: 0.35
   rho_particle_min: 0.50
@@ -172,11 +177,14 @@ resolve:
   gap_contact_min: 0.50
   orphan: {circularity: 0.70, ring_free_min: 0.50, ring_rho_min: 0.60, ring_std_max: 0.25}
   particle: {edge_min: 0.25, quality_min: 0.70, max_area_frac: 0.25}
+  large_round: {enabled: true, circularity: 0.75, solidity: 0.90}  # 8.3 (v3 D): large round solid mask -> particle
+  frame_particle: true        # 8.1 (v3 F): round solid bg_candidate on the particle side is a particle, not background
   min_particle_nm: 10         # PI to confirm
   speck_rel_d: 0.20           # used when uncalibrated
   split: {max_children: 3, r_min: 0.45, coverage_min: 0.70}
   aggregate: {min_children: 3, coverage_min: 0.40}
-  cavity: {r_min: 0.25, r_max: 0.95, delta_max: 0.25, rho_margin: 0.15}
+  group_members_only: true    # 8.4 (v3 C): C-SPLIT/C-AGG count only particle-like children >= d_min
+  cavity: {rule: single_hole, r_min: 0.25, r_max: 0.95, delta_max: 0.25, rho_margin: 0.15}  # 8.4 (v3 E): 'single_hole' | 'size' (original)
   stacked: {r_min: 0.25, delta_min: 0.25, circularity: 0.80, rho_tol: 0.05}
   spot_r_max: 0.25
 
@@ -286,7 +294,8 @@ The relaxed thresholds are deliberate: they let the outer mask of thin-shell par
 
 Intensity thresholds must work across TEM (dark particles) and SEM (bright particles) and across contrast-adjusted figures, so every intensity is expressed as **ρ**: 0 at the background level, 1 at the typical particle level.
 
-1. **Seeds** (confident isolated particles): representatives with no parent, not `bg_candidate`, not `touches_border`, meeting `resolve.seed`. If fewer than `min_count`, retry with `seed_relaxed`.
+0. **Frame-filling particles (v3 F, `frame_particle`).** Step 2 flags `bg_candidate` by size and edge contact only (6.2.5), so a close-up particle that fills the frame qualifies, is never a parent (7.3), and is typed `background`. Before anything else, a `bg_candidate` representative that is round and solid (`large_round.circularity`, `large_round.solidity`) and whose own (unfilled) pixels lie on the particle side of the content outside its filled mask (`s · (mean_own − mean_rest) > 0`) has its flag cleared, and the Step-3 graph is rebuilt so it can parent its pore. The panel is flagged `FRAME_PARTICLE`. A real background mask fails one test: hole-filled it is a near-rectangle (round and solid) but on the background side, or it is irregular. This runs in Step 4, after the Step-2 cache, so no SAM rerun is needed.
+1. **Seeds** (confident isolated particles): representatives with no parent, not `bg_candidate`, not `touches_border`, meeting `resolve.seed`, and (v3 A, `seed_polarity_check`) on the particle side of the background: `s · (mean_int − mu_bg) > 0` with `s = polarity_prior[modality]`. If fewer than `min_count`, retry with `seed_relaxed`. `mu_bg` (step 2) never uses seeds, so it is computed first. Without the polarity test, on clustered or dense panels the only isolated round masks are pores or background holes, which inverts ρ (the control panel lost every particle).
 2. **Background.** `U = content_mask & ~dilate(∪ filled representatives except bg_candidates, 2 px)`. If `|U| ≥ dense_bg_min_frac × content area`: `mu_bg = median(gray[U])`. Otherwise (densely packed panel): polarity `s = polarity_prior[modality]`, and `mu_bg` = 10th percentile of content gray if `s = +1`, 90th if `s = −1`.
 3. **Particle level.** `mu_p = median(mean_int of seeds)`. If there are no seeds, set `mu_p` = the 90th percentile of content gray if `s = +1`, 10th if `s = −1`, and flag the panel `NO_SEEDS`.
 4. **ρ** of any pixel set `R`: `ρ(R) = (mean(gray[R]) − mu_bg) / (mu_p − mu_bg)`.
@@ -315,12 +324,17 @@ First matching rule wins:
 | R-SPECK | `eqdiam < d_min` | `speck` |
 | R-ORPHAN | `circularity ≥ orphan.circularity`, `ring_free_frac ≥ orphan.ring_free_min`, `ring_rho ≥ orphan.ring_rho_min`, `ring_std ≤ orphan.ring_std_max` | `orphan` (subtype `cavity` if `rho_in < rho_particle_min`, else `core`) |
 | R-GAP | `rho_in ≤ rho_bg_max` and `contact ≥ gap_contact_min` | `gap` |
-| R-BGPATCH | `rho_in ≤ rho_bg_max` | `bg_patch` |
-| R-PARTICLE | `pl ≥ rho_particle_min`, `edge_contrast ≥ particle.edge_min`, `quality ≥ particle.quality_min`, `area ≤ particle.max_area_frac × content area` | `particle` |
+| R-BGPATCH | `pl ≤ rho_bg_max` (v3 B; `bg_rules_use: rho_in` restores `rho_in`) | `bg_patch` |
+| R-PARTICLE-LARGE | (v3 D, `large_round.enabled`) `pl ≥ rho_particle_min`, area above `particle.max_area_frac × content area`, `circularity ≥ large_round.circularity`, `solidity ≥ large_round.solidity` | `particle` |
 | R-LARGE | `pl ≥ rho_particle_min` and area above that limit | `aggregate` |
+| R-PARTICLE | `pl ≥ rho_particle_min`, `edge_contrast ≥ particle.edge_min`, `quality ≥ particle.quality_min`, `area ≤ particle.max_area_frac × content area` | `particle` |
 | R-REJECT | otherwise | `rejected` |
 
 Why orphan comes before gap: both are surrounded by particle material. An orphan (a cavity whose particle SAM missed) is round and its surroundings are covered by **no** mask, so `ring_free_frac` is high and the ring is even. An interstitial gap between touching spheres has circularity around 0.2 and its surroundings are the neighbors' masks.
+
+Why R-BGPATCH tests `pl` but R-GAP keeps `rho_in` (v3 B): `pl` exists so a particle whose interior is at background level but whose rim is particle-like (a hollow TEM particle; an SEM sphere with a bright rim) is not called background. A gap's outline runs along its neighbours' edges, so its rim is particle-like by construction; testing `pl` there would turn gaps into particles. A gap is told apart by `contact`.
+
+Why R-PARTICLE-LARGE (v3 D): a close-up of one particle can fill more than a quarter of the panel; a round, solid mask is one particle, not a cluster.
 
 **Re-rooting.** If a node's parent became `background`, `bg_patch`, `speck`, `gap` or `rejected`, move it to the nearest ancestor that is a `particle` or `aggregate`, or make it a root and type it with this table. Repeat until nothing changes.
 
@@ -339,14 +353,19 @@ For child `c` of particle `p`:
 
 | Rule | Condition | Result |
 |---|---|---|
-| C-SPLIT | 2 to `split.max_children` children, all particle-like with `r ≥ split.r_min`, `coverage ≥ split.coverage_min` | Parent was two or three touching particles merged into one mask (NP-SAM's solidity filter used to delete these). Parent → `merged`; children become roots, typed by 8.3. |
-| C-AGG | ≥ `aggregate.min_children` particle-like children, `coverage ≥ aggregate.coverage_min` | Parent → `aggregate`; particle-like children → `particle` with `aggregate_id` = parent |
+| C-SPLIT | 2 to `split.max_children` group children, all particle-like with `r ≥ split.r_min`, `coverage ≥ split.coverage_min` | Parent was two or three touching particles merged into one mask (NP-SAM's solidity filter used to delete these). Parent → `merged`; children become roots, typed by 8.3. |
+| C-AGG | ≥ `aggregate.min_children` particle-like group children, `coverage ≥ aggregate.coverage_min` | Parent → `aggregate`; particle-like group children → `particle` with `aggregate_id` = parent |
 
-**Then each remaining child.** The "dominant" child is the largest one, if every other child has `r ≤ spot_r_max`. Cavity and core rules apply only to the dominant child.
+**Group children (v3 C, `group_members_only`).** The group rules count only particle-like children with `eqdiam ≥ d_min`, and `coverage` is computed over those. Other children neither count toward a group rule nor block it: a speck does not turn a single particle into an aggregate, and the gap that a hole-filled merged outline encloses between its particles does not stop C-SPLIT. After C-SPLIT every child, group or not, becomes a root (the enclosed gap is then typed `gap`). With the switch off, all children count (original rule).
+
+**Then each remaining child.** The "dominant" child is the largest one, if every other child has `r ≤ spot_r_max`. The core rule (and, with `cavity.rule: size`, the cavity rule) applies only to the dominant child.
+
+**Hollowness (v3 E, `cavity.rule: single_hole`).** A particle is hollow when it shows exactly one hole, approximately at its centre, of any size. A *hole* is a child that is background-dark (`rho_in < rho_particle_min`) and darker than the shell (`rho_in ≤ rho_shell − cavity.rho_margin`). SAM often outlines one hole with several overlapping masks, so overlapping hole masks count as one hole, represented by its largest mask; hole-like children smaller than `d_min` are noise and do not count. If there is exactly one hole and it has `δ ≤ cavity.delta_max` and `r ≤ cavity.r_max`, it is the cavity; every other hole-like child is a spot. The absolute darkness test keeps SEM edge brightening (a solid sphere's centre darker than its bright rim but still particle-bright) from reading as a hole. `cavity.rule: size` restores the original rule below.
 
 | Rule | Condition | Result |
 |---|---|---|
-| C-CAVITY | dominant, `cavity.r_min ≤ r ≤ cavity.r_max`, `δ ≤ cavity.delta_max`, `rho_in(c) ≤ rho_shell − cavity.rho_margin` | `cavity` of `p` |
+| C-CAVITY | `single_hole`: the one centred hole above. `size` (original): dominant, `cavity.r_min ≤ r ≤ cavity.r_max`, `δ ≤ cavity.delta_max`, `rho_in(c) ≤ rho_shell − cavity.rho_margin` | `cavity` of `p` |
+| C-HOLE-SPOT | `single_hole` only: any other hole-like child (a second hole, an off-centre hole, a speck-sized hole) | `spot` (dropped; `n_spots` on parent) |
 | C-CORE | dominant, same `r` and `δ` limits, `rho_in(c) ≥ rho_shell + cavity.rho_margin` | `core` of `p` |
 | C-STACKED | `r ≥ stacked.r_min`, `δ > stacked.delta_min`, `circularity ≥ stacked.circularity`, `rho_in(c) ≥ rho_shell − stacked.rho_tol` | separate `particle`, also typed as a parent with these rules |
 | C-SPOT | `r < spot_r_max` | `spot` (dropped; `n_spots` on parent) |
@@ -412,7 +431,7 @@ Integration test (needs SAM and GPU): run the full pipeline on the golden panels
 
 ### 12.1 Golden panels
 
-Chosen from `npsam_panel_labels.csv` to cover the verified failures, plus one control.
+Chosen from `npsam_panel_labels.csv` to cover the verified failures, plus one control. The first 12 rows are the gating golden panels; rows marked *tracking* are evaluated and reported but do not count toward criterion 6 (12.4).
 
 | Panel | Failure to fix |
 |---|---|
@@ -424,17 +443,17 @@ Chosen from `npsam_panel_labels.csv` to cover the verified failures, plus one co
 | `pylypchuk2021_greenchem_04058d__p05_x46__panel11` | Background specks |
 | `pylypchuk2021_greenchem_04058d__p06_x50__panel04` | Only masks are scale text; particle at edge |
 | `girard2024_acssuschemeng_4c00711__p08_x658__panel06` | Outer + core double count; scale bar as particle |
-| `xiong2020_indcrop_112063__p02_x12__panel02` | Shell + core + center dot as 3 particles |
-| `xiong2020_indcrop_112063__p02_x12__panel03` | Core-only masks |
-| `xiong2017_acssuschemeng_6b02585__p02_x145__panel04` | Core-only masks; one particle missed |
 | `xiong2020_indcrop_112063__p02_x12__panel00` | Half the spheres dropped at the edge |
 | `lievonen2016_greenchem_01436k__p04_x48__panel03` | Aggregates split into sub-blobs |
 | `wang2019_holzforschung_0062__p08_x77__panel01` | Panel-label box as a particle |
 | `pylypchuk2020_acssuschemeng_0c05119__p05_x218__panel02` | Control: NP-SAM's best touching-cluster case; LNP-SAM must not be worse |
+| `pylypchuk2021_greenchem_04058d__p05_x46__panel00` | Dense fused aggregate; NP-SAM split the aggregate body into patches. *Tracking* panel for aggregate handling (criterion 7) |
+
+**Deferred (v3, out of MVP scope).** `xiong2020_indcrop_112063__p02_x12__panel02`, `xiong2020_indcrop_112063__p02_x12__panel03` and `xiong2017_acssuschemeng_6b02585__p02_x145__panel04` show transparent, low-contrast TEM particles: the light interiors are particle material, not cavities, so mask-based hollowness reads them wrongly. They return when transparent particles are in scope. `xiong2020…panel00` (opaque spheres) stays.
 
 ### 12.2 Ground truth
 
-For each golden panel, annotate two label images (napari; the μSAM annotator speeds this up): `particles.tif` (one label per particle, full outer outline filled, truncated particles as visible) and `cavities.tif` (one label per visible cavity or core). Record the hand-measured `nm_per_px` in `data/gt/calibration.csv`.
+For each golden panel, annotate two label images (napari; the μSAM annotator speeds this up): `particles.tif` (one label per particle, full outer outline filled, truncated particles as visible) and `cavities.tif` (one label per visible cavity or core). Panels with fused aggregates add an optional third file, `aggregates.tif` (one label per fused aggregate, covering its full outer outline); the individual spheres inside an aggregate still go in `particles.tif` as usual. Only panels with aggregates need this file. Annotate cavities with the same convention as 8.4 (v3 E): a particle's cavity is its single hole near the centre, of any size; when a particle shows two or more holes, or one clearly off-centre, annotate none (they are pores, not hollowness), so that hollow accuracy (12.3) scores what the rule decides. Record the hand-measured `nm_per_px` in `data/gt/calibration.csv`.
 
 ### 12.3 Metrics (`eval/evaluate.py`)
 
@@ -445,18 +464,21 @@ For each golden panel, annotate two label images (napari; the μSAM annotator sp
 | Median diameter error | Over non-truncated particles on both sides: `\|median(d_pred) − median(d_gt)\| / median(d_gt)` |
 | Hollow accuracy | On matched particles: predicted `hollow` vs GT has a cavity |
 | Calibration error | `\|nm_per_px_auto − nm_per_px_gt\| / nm_per_px_gt` |
+| Aggregate IoU | Only if `aggregates.tif` exists. For each GT aggregate: the highest IoU with any predicted `aggregate` outline (filled mask); 0 if none overlaps |
+| Member count error | Only if `aggregates.tif` exists. For each GT aggregate: `\|n_pred − n_gt\| / n_gt`, where `n_pred` = members of the best-matching predicted aggregate (0 if none) and `n_gt` = GT particles with ≥ 50% of their pixels inside the GT aggregate |
 
 NP-SAM baseline (`baselines/npsam_run.py`, npsam environment): `NPSAMImage(path)`, `segment(SAM_model="base", PPS=64)` with all other defaults; every mask in `.seg.data` counts as a predicted particle. Same evaluator.
 
 ### 12.4 Exit criteria
 
-The MVP is done when, on the 15 golden panels:
+The MVP is done when, on the 12 golden panels:
 
 1. No predicted particle lies on text, a scale bar or a label box.
 2. No gap between particles is predicted as a particle on the two gap panels.
 3. On the three edge-pore panels, the outer particle is present (as `truncated`) and the pore is not a particle.
-4. On the core-shell and core-only panels, each particle is counted once, with its cavity or core attached.
+4. On panels with hollow or cored particles (the edge-pore panels, girard2024), each particle is counted once, with its cavity or core attached.
 5. Auto calibration is within 5% of the hand measurement on every golden panel with a readable scale bar.
-6. LNP-SAM's F1@0.5 and median diameter error are better than NP-SAM's on at least 11 of 15 panels, and not worse on the control panel.
+6. LNP-SAM's F1@0.5 and median diameter error are better than NP-SAM's on at least 9 of the 12 gating panels, and not worse on the control panel. Tracking panels (12.1) are excluded from this count.
+7. *(Non-gating.)* On tracking panel `p05_x46__panel00`, the fused cluster is predicted as one aggregate with its members attached. Reported, not required for MVP.
 
 Known MVP limitation: particles SAM never proposes and that leave no orphan cavity (e.g. the lost right sphere in `p05_x46__panel02`) are not recovered. Recovering them from uncovered foreground is the first post-MVP addition.

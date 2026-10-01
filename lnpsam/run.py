@@ -2,10 +2,10 @@
 
     python -m lnpsam.run --manifest data/manifest.csv --config config.yaml --out runs/<name>
 
-This runs Step 1 (Cleanup, spec 5), Step 2 (Proposals, spec 6), and Step 3
-(Graph, spec 7) for every panel. Step-2 nodes are cached per panel and SAM is
-skipped when every consumed input is unchanged. Steps 4-6 are not implemented
-yet.
+This runs Step 1 (Cleanup, spec 5), Step 2 (Proposals, spec 6), Step 3
+(Graph, spec 7), and Step 4 (Resolve, spec 8) for every panel. Step-2 nodes are
+cached per panel and SAM is skipped when every consumed input is unchanged.
+Steps 5-6 are not implemented yet.
 """
 
 from __future__ import annotations
@@ -23,9 +23,10 @@ from . import graph as graph_mod
 from . import io as lnp_io
 from . import overlay as overlay_mod
 from . import proposals as proposals_mod
+from . import resolve as resolve_mod
 
 # Pipeline steps that exist as stubs; presence here documents what is pending.
-_PENDING_STEPS = ("resolve", "recover", "measure")
+_PENDING_STEPS = ("recover", "measure")
 
 
 def _write_png(path, rgb_u8):
@@ -39,11 +40,14 @@ def run_cleanup_stage(
     out_dir,
     run_step2=False,
     run_step3=False,
+    run_step4=False,
     device="auto",
 ):
-    """Run Step 1, optionally followed by cached Step 2 and Step 3."""
+    """Run Step 1, optionally followed by cached Step 2, Step 3 and Step 4."""
     if run_step3 and not run_step2:
         raise ValueError("Step 3 requires Step 2 nodes; set run_step2=True")
+    if run_step4 and not run_step3:
+        raise ValueError("Step 4 requires the Step-3 graph; set run_step3=True")
     cfg = lnp_io.load_config(config_path)
     manifest = lnp_io.load_manifest(manifest_path)
 
@@ -76,8 +80,13 @@ def run_cleanup_stage(
             mask_generator = proposals_mod.make_mask_generator(sam_model, cfg["sam"])
         return mask_generator
 
+    resolve_dir = os.path.join(out_dir, "resolve")
+    if run_step4:
+        os.makedirs(resolve_dir, exist_ok=True)
+
     rows = []
     proposal_rows = []
+    resolve_rows = []
     for _, row in manifest.iterrows():
         panel_id = row["panel_id"]
         image_path = row["image_path"]
@@ -187,11 +196,59 @@ def run_cleanup_stage(
                     f"adjacencies={adjacency_count}"
                 )
 
+            if run_step4:
+                resolved = resolve_mod.run_resolve(
+                    graph_result, gray, result.content_mask, modality, result.nm_per_px, cfg
+                )
+                resolve_mod.roles_table(resolved).to_csv(
+                    os.path.join(resolve_dir, f"{panel_id}__roles.csv"), index=False
+                )
+                with open(os.path.join(resolve_dir, f"{panel_id}__panel.json"), "w") as f:
+                    json.dump({**resolved.panel, "log": resolved.log}, f, indent=2)
+                _write_png(
+                    os.path.join(resolve_dir, f"{panel_id}__overlay.png"),
+                    overlay_mod.resolve_overlay(
+                        rgb_u8, resolved.nodes, result.exclusion, resolved.panel
+                    ),
+                )
+                # Same overlay, upscaled, with each outline tagged by its node_id
+                # (the row in roles.csv).
+                _write_png(
+                    os.path.join(resolve_dir, f"{panel_id}__overlay_ids.png"),
+                    overlay_mod.resolve_overlay(
+                        rgb_u8, resolved.nodes, result.exclusion, resolved.panel,
+                        label_ids=True, scale=3,
+                    ),
+                )
+                counts = resolved.panel["role_counts"]
+                shown = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+                flags = ",".join(resolved.panel["flags"]) or "-"
+                print(f"    resolve: {shown}; flags={flags}")
+                for line in resolved.log:
+                    print(f"    [unresolved] {line}")
+                resolve_rows.append(
+                    {
+                        "panel_id": panel_id,
+                        "modality": modality,
+                        **{k: resolved.panel[k] for k in (
+                            "nm_per_px", "n_seeds", "seed_mode", "bg_mode", "mu_bg",
+                            "mu_p", "d_ref", "d_min", "d_min_source", "n_truncated",
+                            "n_touches_exclusion",
+                        )},
+                        "flags": ";".join(resolved.panel["flags"]),
+                        **{f"n_{k}": v for k, v in counts.items()},
+                    }
+                )
+
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(cleanup_dir, "cleanup_all.csv"), index=False)
     if run_step2:
         pd.DataFrame(proposal_rows).to_csv(
             os.path.join(proposals_dir, "proposals_all.csv"), index=False
+        )
+    if run_step4:
+        pd.DataFrame(resolve_rows).to_csv(
+            os.path.join(resolve_dir, "resolve_all.csv"), index=False
         )
     return df
 
@@ -212,17 +269,19 @@ def main(argv=None):
     print(f"[lnpsam] Step 1: Cleanup -> {os.path.join(args.out, 'cleanup')}")
     print(f"[lnpsam] Step 2: Proposals -> {os.path.join(args.out, 'proposals')}")
     print("[lnpsam] Step 3: Graph")
+    print(f"[lnpsam] Step 4: Resolve -> {os.path.join(args.out, 'resolve')}")
     run_cleanup_stage(
         args.manifest,
         args.config,
         args.out,
         run_step2=True,
         run_step3=True,
+        run_step4=True,
         device=args.device,
     )
     print(
-        f"[lnpsam] Steps 1-3 complete. Steps not yet implemented: "
-        f"{', '.join(_PENDING_STEPS)} (stages 4-6)."
+        f"[lnpsam] Steps 1-4 complete. Steps not yet implemented: "
+        f"{', '.join(_PENDING_STEPS)} (stages 5-6)."
     )
 
 
