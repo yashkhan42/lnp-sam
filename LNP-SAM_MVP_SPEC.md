@@ -6,7 +6,7 @@
 
 **Revision v2 (cleanup robustness).** Sections 1, 4.5, 5.3–5.6, 6.2, 8.5 and 10 incorporate the v2 amendments that fix SAM-input defects found on the golden panels: particle rims masked as bars; a hard black label-box rectangle left in; smooth inpaint blobs; an undetected burned-in SEM scale bar; scale-bar length under-measured by dropping end serifs; and fills that smear a particle they overlap. `LNP-SAM_MVP_SPEC_AMENDMENTS.md` holds the defect evidence, root-cause analysis, validation numbers and references; this spec states the resulting behaviour. Design principle: the exclusion mask is the source of truth for "not a particle" and must be complete and precise; filling only blends; a particle that overlaps the exclusion or the border is kept but out of the diameter stats (`touches_exclusion`, 6.2/8.5/10); and the hard guarantee is section 6.2.3 (drop any SAM proposal ≥ `excl_drop_frac` inside the exclusion), which Step 2 must enforce against the mask cleanup produces.
 
-**Revision v3 (resolve robustness, scope).** Sections 1, 4.5, 8.1, 8.3, 8.4, 12.1, 12.2 and 12.4 incorporate the v3 amendments found by running Step 4 on the golden panels: seeds of the wrong polarity inverting ρ (A); rim-dark/rim-bright particles typed as background (B); specks and enclosed gaps distorting the group rules (C); close-up single particles typed as aggregates (D); hollowness defined by a single centred hole of any size (E); and a particle filling the frame typed as background (F). Transparent, low-contrast TEM particles are out of MVP scope, so the three xiong panels showing them leave the golden set (12 gating panels). Each rule change has a config switch restoring the original rule; `LNP-SAM_MVP_SPEC_AMENDMENTS.md` (§10–11) holds the evidence.
+**Revision v3 (resolve robustness, scope).** Sections 1, 4.5, 8.1, 8.3, 8.4, 12.1, 12.2 and 12.4 incorporate the v3 amendments found by running Step 4 on the golden panels: seeds of the wrong polarity inverting ρ (A); rim-dark/rim-bright particles typed as background (B); specks and enclosed gaps distorting the group rules (C); close-up single particles typed as aggregates (D); hollowness defined by a single centred hole of any size (E); and a particle filling the frame typed as background (F). Transparent, low-contrast TEM particles are out of MVP scope, so the three xiong panels showing them leave the golden set (12 gating panels). Each rule change has a config switch restoring the original rule; `LNP-SAM_MVP_SPEC_AMENDMENTS.md` (§10–11) holds the evidence. v3 also **defers Step 5** (section 9): the golden panels contain no orphans, and box-prompt recovery cannot capture the in-scope hollow particles; its 9.6 fallback runs in Step 6 (10.0). Section 10 records the Step-6 output details (v3; amendments §12–13).
 
 ## 1. Scope
 
@@ -18,7 +18,7 @@
 | Relation graph: duplicates, containment, adjacency | — |
 | Rules: particle, gap, speck, background, orphan; cavity, core, stacked, spot; merged pair split; aggregate flag | Film class, rim-fragment merging, learned classifiers |
 | Keep edge-truncated particles (flagged) | Measuring them by arc fit; edge correction |
-| Recover the missing parent of an orphan cavity by prompting SAM | Recovering particles from uncovered foreground |
+| Flag orphan cavities; unrecovered-orphan fallback (9.6, run in Step 6) | Recovering an orphan's missing parent by prompting SAM (Step 5, deferred in v3); recovering particles from uncovered foreground |
 | Hollowness from masks (cavity child) | Radial-profile physics model |
 | Aggregates flagged and reported separately | Primary-particle sizing inside aggregates |
 | Diameter = equivalent-area diameter; panel stats | Ellipse fits, morphology classes, quality gate |
@@ -47,7 +47,7 @@ From reading `npsam` 3.2.3 (`npsam.py`, `utils.py`):
 | 2. Proposals | SAM input → candidate masks with scores and features | Permissive: keep everything plausible |
 | 3. Graph | candidates → duplicate clusters, parent/child tree, adjacency | Relations between masks |
 | 4. Resolve | graph → a role for every mask | The rules |
-| 5. Recover | orphan cavities → recovered parent particles; rerun 3–4 once | Fix "pore kept, particle lost" |
+| 5. Recover *(deferred, v3)* | orphan cavities → recovered parent particles; rerun 3–4 once | Fix "pore kept, particle lost". Not run in the MVP (section 9); its 9.6 fallback runs in Step 6 |
 | 6. Measure | resolved particles → particle table, panel summary, overlay | Output |
 
 ## 4. Setup
@@ -69,7 +69,7 @@ lnpsam/
     proposals.py   # step 2
     graph.py       # step 3
     resolve.py     # step 4
-    recover.py     # step 5
+    recover.py     # step 5 (deferred, v3)
     measure.py     # step 6
     overlay.py
     run.py         # CLI
@@ -79,6 +79,8 @@ lnpsam/
 ```
 
 Run: `python -m lnpsam.run --manifest data/manifest.csv --config config.yaml --out runs/<name>`
+
+SAM (Step 2) runs on the HPC. To rerun Steps 1, 3, 4 and 6 elsewhere on existing proposals, add `--proposals-from <dir>`: each panel's `proposals/<panel_id>__nodes.parquet` under `<dir>` is loaded as-is and SAM is never loaded (v3).
 
 ### 4.3 Input manifest (`data/manifest.csv`)
 
@@ -188,7 +190,7 @@ resolve:
   stacked: {r_min: 0.25, delta_min: 0.25, circularity: 0.80, rho_tol: 0.05}
   spot_r_max: 0.25
 
-recover:
+recover:                      # step 5 (spec 9): deferred in v3, not used by the MVP
   box_scales: [1.6, 2.2]
   contain_min: 0.90
   circularity_min: 0.70
@@ -383,6 +385,8 @@ Every representative has `role` and `rule_id`. Roles: `particle`, `cavity`, `cor
 
 ## 9. Step 5: Recover orphans
 
+**Deferred in v3 (not run in the MVP).** Step 2's relaxed SAM settings and the Step-4 rules already keep the outer particle on every "pore kept, particle lost" golden panel (01, 04, 19), and the golden panels contain no orphans; the only near-miss was a gap (`p05_x46__panel02` node 2). Box-prompt recovery also cannot capture the in-scope hollow particles: a box of `max(box_scales) × d_o` contains the particle only when the cavity is at least `1 / max(box_scales)` ≈ 0.45 of the particle's diameter, while in-scope central openings are 0.12–0.36 (large cavities belong to the transparent thin-shell TEM particles, out of scope). Step 4 still types orphans (8.3); step 6 below runs at the start of Step 6 (10.0). The procedure is kept for later:
+
 For each `orphan` with diameter `d_o` and centroid `c_o`:
 
 1. Reuse the SAM embedding from step 2 (`SamPredictor.set_image` on the same cropped image; cache the features, don't recompute).
@@ -394,19 +398,35 @@ For each `orphan` with diameter `d_o` and centroid `c_o`:
 
 ## 10. Step 6: Measure and write
 
+### 10.0 Unrecovered orphans (v3)
+
+With Step 5 deferred, every `orphan` reaching Step 6 is unrecovered, so 9.6 is applied first: `cavity` subtype → `unresolved`, flag `ORPHAN_UNRECOVERED`; `core` subtype → `particle`, flag `POSSIBLE_CORE_ONLY` (counted, out of the stats). Both get `rule_id = ORPHAN-FALLBACK` and keep their masks; the panel is flagged `ORPHAN_FALLBACK`.
+
 ### 10.1 Per particle (`particles.csv`)
 
 `particle_id`, `panel_id`, `paper_id`, `d_px` (eqdiam of filled mask), `d_nm`, `feret_max_nm`, `aspect` (`axis_major_length / axis_minor_length`), `area_nm2`, `cavity_d_nm`, `shell_nm = (d_nm − cavity_d_nm)/2`, `core_d_nm`, `hollow` (has cavity), `truncated`, `touches_exclusion` (v2), `aggregate_id`, `source` (`sam`, `recover`), `rule_id`, `flags`, `in_stats`.
 
 `in_stats = not truncated and not touches_exclusion and not POSSIBLE_CORE_ONLY` (v2). Aggregate members are included and marked, so stats can be recomputed with or without them.
 
+Details (v3): one row per `particle` node; `particle_id` is its `node_id` (the same id as in `particles.tif`, the id overlays, `nodes.parquet` and `roles.csv`), `aggregate_id` the aggregate's `node_id`. `feret_max` and `aspect` come from `skimage.measure.regionprops` of the filled mask; `cavity_d`/`core_d` are the `eqdiam` of the particle's `cavity`/`core` child. `*_nm` columns are empty when uncalibrated (5.5), so each has a pixel twin after the spec columns: `area_px`, `feret_max_px`, `cavity_d_px`, `shell_px`, `core_d_px`; plus `n_spots` (spots owned by the particle, including holes that are not its cavity, 8.4). `flags` lists `POSSIBLE_CORE_ONLY` and `FRAME_PARTICLE` (8.1 step 0).
+
 ### 10.2 Per panel (`panel.json`)
 
 `nm_per_px`, `cal_source`, `n_particles`, `n_in_stats`, `n_truncated`, `n_touches_exclusion` (v2), `n_hollow`, `n_aggregates`, counts per role, flags, and over `in_stats` particles (only if `n_in_stats ≥ min_particles_for_stats`): mean, SD, median, D10, D90 of `d_nm` (of `d_px` if uncalibrated), computed twice: all particles, and excluding aggregate members.
 
+Details (v3): `stats_unit` is `nm` or `px`; SD is the sample SD (`ddof = 1`); D10/D90 are the 10th/90th percentiles (linear interpolation). A stats block is `null` when it has fewer than `min_particles_for_stats` particles (panel flag `TOO_FEW_FOR_STATS` for the all-particle block). Panel flags are the Step-4 flags plus `UNCALIBRATED` and `ORPHAN_FALLBACK`. Aggregates are reported separately in `aggregates` (per aggregate: `aggregate_id`, `d`, `area` in px and nm, `n_members`, `touches_border`, `touches_exclusion`, `rule_id`), and `resolve` holds the 8.1 panel levels (`mu_bg`, `mu_p`, seeds, `d_ref`, `d_min`).
+
 ### 10.3 Other files
 
-`nodes.parquet` (every node: ids, RLEs, features, role, rule_id, parent, flags) and `overlay.png`: particles green, truncated particles green with "T", cavities magenta, gaps blue, specks gray, orphans purple, rejected red dashed, aggregates thick white, exclusion mask red at 30%, calibration text in a corner. Run-level `particles_all.csv` and `panels_all.csv`.
+**Final outputs (v3)** hold only what is reported, like NP-SAM's masks + overlay + table: particles and aggregates. Cavities and cores are used to classify and measure particles (`hollow`, `cavity_d`, `shell`, `core_d` in 10.1) but are not output as masks; duplicates, spots, gaps, specks, background, rejected and unresolved masks are not output at all. Per panel, in `<out>/measure/`:
+
+- `<panel_id>__particles.csv` (10.1) and `<panel_id>__panel.json` (10.2).
+- `<panel_id>__particles.tif`: the filled particle masks as an `(N, H, W)` uint8 stack (255 inside), page *k* = row *k* of `particles.csv`, ids in the TIFF description; overlapping masks stay whole (4.4: never a single label image). `<panel_id>__aggregates.tif`: the same for aggregates, in `panel.json` order. Each is written only when non-empty.
+- `<panel_id>__overlay.png`: every particle outlined in its own colour (as NP-SAM does) — solid when it is in the size statistics, dashed when it is not (truncated, touching the exclusion, or `POSSIBLE_CORE_ONLY`); aggregates thick white; exclusion mask red at 30 %; calibration and counts in a corner; a colour key below. Nothing else is drawn. `<panel_id>__overlay_ids.png`: the same at 3×, each particle tagged with its `particle_id` (aggregates "A<id>").
+
+Run-level `particles_all.csv` and `panels_all.csv` (one row per panel, stats flattened) in `<out>/`.
+
+**Review trace (v3)**, in `<out>/resolve/`, for checking decisions rather than for results: `nodes.parquet` (every node: ids, RLEs, features, role, rule_id, parent, flags; after 10.0; masks as COCO RLE only, `rule_trace` `>`-joined, `flags` `;`-joined), `roles.csv`, `resolve.json` (Step-4 statistics) and the all-roles overlay `overlay.png` / `overlay_ids.png`: particles green, truncated particles green with "T" (particles touching the exclusion "E"), cavities magenta, gaps blue, specks gray, orphans dashed magenta (purple in v2; none after 10.0), rejected red dashed, aggregates thick white, exclusion mask red at 30%, calibration text in a corner, colour key below.
 
 ## 11. Tests
 
@@ -469,6 +489,13 @@ For each golden panel, annotate two label images (napari; the μSAM annotator sp
 
 NP-SAM baseline (`baselines/npsam_run.py`, npsam environment): `NPSAMImage(path)`, `segment(SAM_model="base", PPS=64)` with all other defaults; every mask in `.seg.data` counts as a predicted particle. Same evaluator.
 
+Implementation notes (v3):
+
+- LNP-SAM is scored on its final outputs (`particles.tif` + `particles.csv`, `aggregates.tif` + `panel.json`, 10.3).
+- Run: `python baselines/npsam_run.py --manifest data/manifest.csv --out runs/npsam_base` (HPC, npsam environment; numpy-only output: `<panel_id>__masks.npz`, the bit-packed `(N, H, W)` mask stack, so overlapping masks stay whole). Then `python -m eval.evaluate --run runs/<name> --gt data/gt --npsam runs/npsam_base`, which writes `metrics.csv`, `unmatched.csv`, `aggregates.csv` and `criteria.json` to `runs/<name>/eval/`. Panels without `particles.tif` are skipped. The evaluator also reads the older label-image export (`masks/<panel_id>.npy`, as in `04_npsam_hpc/base/`), in which overlapping masks lost shared pixels and which was not run with an explicit `PPS=64`; prefer the runner's output.
+- Every mask (GT, LNP-SAM, NP-SAM) is compared filled. Diameters are equivalent-area diameters in pixels, so the median diameter error scores segmentation alone. "Truncated" means within 1 px of the content-box edge (6.3), applied the same way to all methods and to GT. A GT cavity belongs to the GT particle holding ≥ 50 % of it.
+- Criteria from `criteria.json`: 5 (auto calibrations within 5 %; panels with a GT calibration but no auto calibration are listed for a readability check), 6 (the tally above) and 7 (aggregate records) are decided automatically. 3 is checked on the edge-pore panels (every truncated GT particle matched; no prediction with IoU ≥ 0.5 against a GT cavity) and 4 on the hollow/core panels (no unmatched prediction lying ≥ 50 % inside a matched GT particle; hollow accuracy 1.0). 1 and 2 need review: `unmatched.csv` lists every prediction that matches no GT particle.
+
 ### 12.4 Exit criteria
 
 The MVP is done when, on the 12 golden panels:
@@ -481,4 +508,4 @@ The MVP is done when, on the 12 golden panels:
 6. LNP-SAM's F1@0.5 and median diameter error are better than NP-SAM's on at least 9 of the 12 gating panels, and not worse on the control panel. Tracking panels (12.1) are excluded from this count.
 7. *(Non-gating.)* On tracking panel `p05_x46__panel00`, the fused cluster is predicted as one aggregate with its members attached. Reported, not required for MVP.
 
-Known MVP limitation: particles SAM never proposes and that leave no orphan cavity (e.g. the lost right sphere in `p05_x46__panel02`) are not recovered. Recovering them from uncovered foreground is the first post-MVP addition.
+Known MVP limitation: particles SAM never proposes (Step 5 is deferred, section 9), and particles that leave no orphan cavity (e.g. the lost right sphere in `p05_x46__panel02`) are not recovered. Recovering them from uncovered foreground is the first post-MVP addition.

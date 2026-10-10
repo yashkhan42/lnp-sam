@@ -1,13 +1,14 @@
 """Overlays.
 
-The full resolved-particle overlay (spec 10.3) is part of Step 6 and is not
-implemented yet. :func:`cleanup_overlay` renders Step 1,
-:func:`proposal_overlay` draws every surviving Step-2 mask for proposal review,
-and :func:`resolve_overlay` draws the Step-4 roles for review.
+:func:`cleanup_overlay` renders Step 1, :func:`proposal_overlay` draws every
+surviving Step-2 mask for proposal review, :func:`resolve_overlay` draws every
+Step-4 role for review, and :func:`overlay` is the clean Step-6 output overlay
+(particles and aggregates only, spec 10.3 v3).
 """
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 
 import cv2
@@ -118,8 +119,12 @@ def _dashed_contours(img, contours, color, width=1, dash=4):
 
 
 def _legend(width, scale):
-    """Colour key strip, wrapped to the image width."""
-    items = [(role, *_ROLE_STYLE[role]) for role in reversed(_DRAW_ORDER)]
+    """Colour key of the role overlay, wrapped to the image width."""
+    return _key_strip(width, scale, [(role, *_ROLE_STYLE[role]) for role in reversed(_DRAW_ORDER)])
+
+
+def _key_strip(width, scale, items):
+    """Key strip of ``(text, color, line_width, dashed)`` entries, wrapped to ``width``."""
     font, row_h, swatch = 0.35 * scale, int(14 * scale), int(14 * scale)
     rows, row, x = [], [], 4
     for role, color, line, dashed in items:
@@ -141,6 +146,53 @@ def _legend(width, scale):
             cv2.putText(strip, role, (x + swatch + 4, y + int(4 * scale)), _FONT, font,
                         (230, 230, 230), 1, cv2.LINE_AA)
     return strip
+
+
+def _calibration_text(panel):
+    nm = panel.get("nm_per_px")
+    if not nm:
+        return "uncalibrated (px)"
+    source = panel.get("cal_source")
+    return f"{nm:.4g} nm/px ({source})" if source else f"{nm:.4g} nm/px"
+
+
+def _top_point(contours):
+    top = min(contours, key=lambda c: c[:, 0, 1].min())[:, 0, :]
+    x, y = top[np.argmin(top[:, 1])]
+    return int(x), int(y)
+
+
+def _draw_tags(img, labels):
+    """Id tags ``(x, y, text, color)`` at the top of each outline; collisions shift right."""
+    placed = []
+    for x, y, text, color in sorted(labels, key=lambda item: (item[1], item[0])):
+        (w, h), _ = cv2.getTextSize(text, _FONT, 0.45, 1)
+        y = max(h + 2, y - 3)
+        while any(abs(x - px) < max(w, pw) + 3 and abs(y - py) < h + 4 for px, py, pw in placed):
+            x += w + 4
+        placed.append((x, y, w))
+        cv2.rectangle(img, (x - 1, y - h - 2), (x + w + 1, y + 2), (0, 0, 0), -1)
+        cv2.putText(img, text, (x, y), _FONT, 0.45, color, 1, cv2.LINE_AA)
+
+
+def _base_image(rgb_u8, exclusion, scale):
+    img = np.asarray(rgb_u8).copy()
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    excl = np.asarray(exclusion, dtype=bool)
+    if excl.any():
+        img[excl] = (img[excl] * 0.7 + np.array([255, 0, 0]) * 0.3).astype(np.uint8)
+    if scale != 1:
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    return img
+
+
+def _contours(mask, scale):
+    mask = np.asarray(mask, dtype=np.uint8)
+    if scale != 1:
+        mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    return contours
 
 
 def resolve_overlay(rgb_u8, nodes, exclusion, panel, label_ids=False, scale=1):
@@ -178,28 +230,21 @@ def resolve_overlay(rgb_u8, nodes, exclusion, panel, label_ids=False, scale=1):
                 _dashed_contours(img, contours, color, width)
             else:
                 cv2.drawContours(img, contours, -1, color, width, lineType=cv2.LINE_8)
-            if role == "particle" and node.get("truncated"):
+            # "T": truncated by the border; "E": touches removed furniture.
+            # Either keeps the particle out of the diameter stats (8.5, 10.1).
+            mark = "T" * bool(node.get("truncated")) + "E" * bool(node.get("touches_exclusion"))
+            if role == "particle" and mark:
                 cy, cx = (v * scale for v in node["centroid"])
-                cv2.putText(img, "T", (int(cx) - 3, int(cy) + 4), _FONT, 0.35 * scale,
-                            color, 1, cv2.LINE_AA)
+                cv2.putText(img, mark, (int(cx) - 3 * len(mark), int(cy) + 4), _FONT,
+                            0.35 * scale, color, 1, cv2.LINE_AA)
             if label_ids and contours:
                 top = min(contours, key=lambda c: c[:, 0, 1].min())[:, 0, :]
                 x, y = top[np.argmin(top[:, 1])]
                 labels.append((int(x), int(y), str(node["node_id"]), color))
 
-    # Node-id tags at the top of each outline; colliding tags shift right.
-    placed = []
-    for x, y, text, color in sorted(labels, key=lambda item: (item[1], item[0])):
-        (w, h), _ = cv2.getTextSize(text, _FONT, 0.45, 1)
-        y = max(h + 2, y - 3)
-        while any(abs(x - px) < max(w, pw) + 3 and abs(y - py) < h + 4 for px, py, pw in placed):
-            x += w + 4
-        placed.append((x, y, w))
-        cv2.rectangle(img, (x - 1, y - h - 2), (x + w + 1, y + 2), (0, 0, 0), -1)
-        cv2.putText(img, text, (x, y), _FONT, 0.45, color, 1, cv2.LINE_AA)
+    _draw_tags(img, labels)
 
-    nm = panel.get("nm_per_px")
-    cal = f"{nm:.4g} nm/px" if nm else "px"
+    cal = _calibration_text(panel)
     counts = panel["role_counts"]
     txt = (f"{cal} P{counts['particle']} A{counts['aggregate']} C{counts['cavity']} "
            f"G{counts['gap']} O{counts['orphan']} R{counts['rejected']}")
@@ -207,9 +252,53 @@ def resolve_overlay(rgb_u8, nodes, exclusion, panel, label_ids=False, scale=1):
     return np.vstack([img, _legend(img.shape[1], scale)])
 
 
-def overlay(*args, **kwargs):
-    """Full particle overlay (spec 10.3) -- NOT YET IMPLEMENTED (stage 6)."""
-    raise NotImplementedError(
-        "The particle overlay (spec 10.3) is not implemented yet. "
-        "Use cleanup_overlay for stage 1."
-    )
+def distinct_colors(n):
+    """``n`` well-separated bright RGB colours (golden-ratio hue steps), deterministic."""
+    return [
+        tuple(int(255 * c) for c in colorsys.hsv_to_rgb((0.13 + k * 0.618034) % 1.0, 0.85, 1.0))
+        for k in range(n)
+    ]
+
+
+def overlay(rgb_u8, particles, aggregates, exclusion, panel, label_ids=False, scale=1):
+    """Final Step-6 overlay (spec 10.3, v3): only what Step 6 reports.
+
+    ``particles`` is a list of ``{"id", "mask", "in_stats"}`` (filled masks, in
+    ``particles.csv`` order); ``aggregates`` a list of ``{"id", "mask"}``. Each
+    particle is outlined in its own colour, as NP-SAM's overlays do: solid when it
+    counts in the size statistics, dashed when it does not (truncated by the
+    border, touching removed furniture, or a possible core). Aggregates get a
+    thick white outline. Cavities, cores, spots, gaps and every other Step-4 role
+    are not drawn: they live in ``particles.csv`` (``hollow``, ``cavity_d``,
+    ``core_d``) and in the Step-4 review overlay. Exclusion red at 30 %; the
+    calibration and counts in a corner; a key below. ``label_ids`` tags each
+    particle with its ``particle_id`` (aggregates with "A<id>").
+    """
+    img = _base_image(rgb_u8, exclusion, scale)
+    width = max(1, scale // 2)
+    labels = []
+    for agg in aggregates:
+        contours = _contours(agg["mask"], scale)
+        cv2.drawContours(img, contours, -1, (255, 255, 255), 3 * scale, lineType=cv2.LINE_8)
+        if label_ids and contours:
+            labels.append((*_top_point(contours), f"A{agg['id']}", (255, 255, 255)))
+    for color, part in zip(distinct_colors(len(particles)), particles):
+        contours = _contours(part["mask"], scale)
+        if part["in_stats"]:
+            cv2.drawContours(img, contours, -1, color, width, lineType=cv2.LINE_8)
+        else:
+            _dashed_contours(img, contours, color, width)
+        if label_ids and contours:
+            labels.append((*_top_point(contours), str(part["id"]), color))
+    _draw_tags(img, labels)
+
+    cal = _calibration_text(panel)
+    n_in = sum(p["in_stats"] for p in particles)
+    txt = f"{cal}  {len(particles)} particles ({n_in} in stats)  {len(aggregates)} aggregates"
+    cv2.putText(img, txt, (4, int(12 * scale)), _FONT, 0.35 * scale, (255, 255, 0), 1, cv2.LINE_AA)
+    key = [
+        ("particle (solid: in size stats)", (0, 220, 0), 1, False),
+        ("particle out of stats (edge / removed area)", (0, 220, 0), 1, True),
+        ("aggregate", (255, 255, 255), 3, False),
+    ]
+    return np.vstack([img, _key_strip(img.shape[1], scale, key)])

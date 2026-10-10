@@ -1,2 +1,14 @@
-panel_id,nm_per_px
-pylypchuk2021_greenchem_04058d__p05_x46__panel00,
+panel_id,nm_per_px,scale_nm,bar_px,bar_in_panel,source_figure,panel_xy_in_figure
+pylypchuk2021_greenchem_04058d__p05_x46__panel02,2.4905,300,120.46,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"746,53"
+pylypchuk2021_greenchem_04058d__p05_x46__panel17,2.48862,300,120.55,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"747,757"
+pylypchuk2021_greenchem_04058d__p05_x46__panel01,2.50971,300,119.54,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"412,54"
+pylypchuk2021_greenchem_04058d__p05_x46__panel04,2.48251,300,120.85,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"1418,53"
+pylypchuk2021_greenchem_04058d__p05_x46__panel19,2.48905,300,120.53,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"1417,756"
+pylypchuk2021_greenchem_04058d__p05_x46__panel11,2.50972,300,119.54,False,pylypchuk2021_greenchem_04058d__p05_x46.png,"412,525"
+pylypchuk2021_greenchem_04058d__p06_x50__panel04,2.47935,300,121.0,False,pylypchuk2021_greenchem_04058d__p06_x50.png,"1478,56"
+girard2024_acssuschemeng_4c00711__p08_x658__panel06,1.81835,100,54.99,True,girard2024_acssuschemeng_4c00711__p08_x658.png,"337,669"
+xiong2020_indcrop_112063__p02_x12__panel00,7.82809,500,63.87,False,xiong2020_indcrop_112063__p02_x12.png,"50,40"
+lievonen2016_greenchem_01436k__p04_x48__panel03,2.15735,100,46.35,True,lievonen2016_greenchem_01436k__p04_x48.png,"514,509"
+wang2019_holzforschung_0062__p08_x77__panel01,2.46884,500,202.52,True,wang2019_holzforschung_0062__p08_x77.png,"836,0"
+pylypchuk2020_acssuschemeng_0c05119__p05_x218__panel02,1.17342,200,170.44,True,pylypchuk2020_acssuschemeng_0c05119__p05_x218.png,"1911,4"
+pylypchuk2021_greenchem_04058d__p05_x46__panel00,2.4895,300,120.51,True,pylypchuk2021_greenchem_04058d__p05_x46.png,"76,53"

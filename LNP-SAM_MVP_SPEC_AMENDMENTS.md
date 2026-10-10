@@ -7,8 +7,9 @@ validation numbers and references. Where an amendment changes the behaviour of a
 numbered section, that section is named. All new thresholds live in `config.yaml` under
 `cleanup:` (per spec §4.4).
 
-**Scope of this revision.** v2 (§1–9 below): Step 1 (Cleanup, §5) only. v3 (§10–11):
-Step 4 (Resolve, §8) and the golden-set scope (§1, §12).
+**Scope of this revision.** v2 (§1–9 below): Step 1 (Cleanup, §5) only. v3 (§10–13):
+Step 4 (Resolve, §8), the golden-set scope (§1, §12), the deferral of Step 5 (§9) and
+the Step-6 output details (§10).
 
 ---
 
@@ -389,3 +390,64 @@ the MVP covers only particles with clear solidity (SEM and TEM). These panels mo
 spheres) stays. The gating set becomes 12 panels and criterion 6 keeps its ~73 % bar,
 rounded up: **9 of 12** (was 11 of 15). Criterion 4 now refers to the hollow/cored
 panels that remain (edge-pore panels, girard2024).
+
+## 12. v3 — Step 5 (Recover) deferred (changes §1, §3, §9, §10)
+
+**Decision (user, 2026-10-01).** Step 5 is not run in the MVP. Evidence:
+
+- **The failure Step 5 targets is already fixed upstream.** The three golden panels where
+  NP-SAM kept the pore and lost the particle (`p05_x46` panel01, 04, 19) all keep the
+  outer particle after Steps 2–4 (relaxed SAM thresholds + no border/shape filters + the
+  v3 rules).
+- **No orphans on the golden panels.** A scan of every root that is round, dark and
+  ringed by particle material found one near-miss: `p05_x46__panel02` node 2, which is
+  the gap between the lower spheres (typed `gap`), i.e. it would have been a *false*
+  orphan. The top sphere's real pore (node 9, 49 px) fails R-ORPHAN regardless: its
+  2-px ring lies in the pore's own dark blur (`ring_rho` −1.64).
+- **Box prompts cannot capture in-scope hollow particles.** §9 step 2 prompts a box of
+  side `scale × d_o`, `scale ≤ 2.2`. It contains the particle only when the cavity's
+  diameter is ≥ 1/2.2 ≈ 0.45 of the particle's. In-scope openings are 0.12–0.36 of the
+  diameter (SEM spheres; node 9 is ~8 px in a ~90 px sphere). Large cavities belong to
+  the transparent thin-shell TEM particles that v3 put out of scope (§11).
+- A local SAM probe on 11 non-golden pore/edge panels was stopped: SAM runs on the HPC
+  only.
+
+**What remains.** Step 4 still types orphans (R-ORPHAN). The §9.6 fallback runs at the
+start of Step 6 (§10.0): cavity-type → `unresolved` + `ORPHAN_UNRECOVERED`; core-type →
+`particle` + `POSSIBLE_CORE_ONLY` (out of the stats). `lnpsam/recover.py` stays a stub that
+says so; the `recover:` config is kept for when Step 5 returns (e.g. with box sizes tied
+to the expected particle size rather than the orphan's).
+
+## 13. v3 — Step 6 implementation notes (changes §10)
+
+Implemented in `lnpsam/measure.py` (+ `overlay.overlay`, `run.py`); spec §10 now records
+these details. Choices where §10 was silent:
+
+| Item | Choice | Why |
+|---|---|---|
+| `particle_id` | the node's `node_id` | Same id in `nodes.parquet`, `roles.csv` and the id overlay, so a row can be found on the image |
+| Pixel twins `area_px`, `feret_max_px`, `cavity_d_px`, `shell_px`, `core_d_px`; `n_spots` | added after the spec columns | 10 of 13 golden panels are uncalibrated until `nm_per_px` is measured, so the `*_nm` columns would be empty; `n_spots` keeps non-cavity pores visible |
+| Feret, aspect | `skimage.measure.regionprops` on the filled mask (`feret_diameter_max`, `axis_major_length / axis_minor_length`) | Standard definitions; `None` for degenerate masks |
+| SD, D10, D90 | sample SD (`ddof = 1`); 10th/90th percentiles (linear) | Usual size-distribution conventions |
+| Aggregates | listed in `panel.json["aggregates"]` with `n_members` | §1 "reported separately"; no new file |
+| Overlay | "E" marks particles touching the exclusion ("TE" with truncation); colour key; `overlay_ids.png` at 3× with node ids | Shows at a glance why a particle is out of the stats; lets reviewers match rows to outlines |
+| Final vs review outputs | `measure/` holds only particles and aggregates: `particles.csv`, `panel.json`, `particles.tif` / `aggregates.tif` (one mask per page), a clean overlay (one colour per particle; dashed = out of stats); everything else (`nodes.parquet`, `roles.csv`, the all-roles overlay) moves to `resolve/` | The §10.3 overlay and `nodes.parquet` as first written were Step-4 diagnostics (cavities, gaps, specks, duplicates, rejected). The user asked for a clean NP-SAM-like final output: cavities/cores classify particles but are not output as masks. TIFF stacks keep overlapping masks whole (6 % of particle pixels overlap in `runs/mvp_v1`, up to 20 % on a panel), so no label image |
+| `--proposals-from DIR` | reuse HPC Step-2 nodes, never load SAM | SAM runs on the HPC; Steps 1, 3, 4, 6 iterate locally. `proposals.py` untouched, so the HPC proposal cache stays valid |
+
+**First full run** (`runs/mvp_v1/`, 13 panels, HPC proposals, local Steps 1, 3, 4, 6):
+358 particles. Local Step 1 matches the HPC Step 1 exactly on all 13 panels (exclusion
+fraction, OCR boxes, calibration). Stats are computed on 6 panels; the other 7 have
+fewer than 5 in-stats particles (close-ups and edge panels). Two findings to keep in
+view: `wang2019 panel01`'s median (71 nm) is pulled down by three small in-stats blobs
+(17–71 nm) beside its two ~0.9–1.0 µm spheres; `p05_x46__panel02/17/19` have no
+exclusion at all (OCR finds no text; the deferred scale-text issue).
+
+**Evaluation and baseline (spec §12.3), implemented with Step 6.** `eval/evaluate.py`
+computes every §12.3 metric for LNP-SAM and NP-SAM and writes the §12.4 criteria report;
+`baselines/npsam_run.py` produces the NP-SAM baseline on the HPC. Notable choices: NP-SAM
+masks are filled before comparison (GT outlines are filled), diameters are compared in
+pixels (calibration scored separately), and the existing `04_npsam_hpc/base` export is
+readable but lossy: overlapping masks were flattened into one label image (e.g.
+lievonen panel03: 186 masks → 179 labels) and `PPS` was not set to 64. Re-running the
+baseline with `npsam_run.py` gives the spec's baseline exactly.
+
