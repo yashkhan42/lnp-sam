@@ -353,3 +353,45 @@ def run_graph(nodes, cfg):
         representative_ids=representative_ids,
         duplicate_clusters=duplicate_clusters,
     )
+
+
+def add_virtual_nodes(graph_result, virtual_nodes, cfg):
+    """v4: rebuild the Step-3 relations with ``virtual_nodes`` added as representatives.
+
+    Duplicate removal (7.2) is not rerun, so the SAM duplicates and
+    representatives stay exactly as they were and a virtual node is never a
+    duplicate. Parents, adjacency and coverage (7.3-7.5) are recomputed over the
+    representatives plus the virtual nodes with the unchanged rules, so the SAM
+    masks inside a virtual node become its children.
+    """
+    _, contain_frac, contain_area_ratio, adjacent_px = _graph_config(cfg)
+    graph_nodes = []
+    for original in list(graph_result.nodes) + list(virtual_nodes):
+        node = dict(original)
+        if node.get("virtual"):
+            node["representative_id"] = node["node_id"]
+            node["is_representative"] = True
+        if node["is_representative"]:
+            node.update(parent=None, children=[], adjacent=[], coverage=0.0)
+        graph_nodes.append(node)
+    graph_nodes.sort(key=lambda node: node["node_id"])
+    representatives = [node for node in graph_nodes if node["is_representative"]]
+
+    representative_pairs = _compute_pairs(representatives, adjacent_px)
+    _assign_parents(
+        representatives,
+        representative_pairs,
+        contain_frac,
+        contain_area_ratio,
+    )
+    _assign_adjacency(representatives, representative_pairs, adjacent_px)
+    _compute_children_coverage(representatives)
+
+    return GraphResult(
+        nodes=graph_nodes,
+        pairs=graph_result.pairs,
+        representative_pairs=representative_pairs,
+        representative_ids=[node["node_id"] for node in representatives],
+        duplicate_clusters=graph_result.duplicate_clusters
+        + [[node["node_id"]] for node in virtual_nodes],
+    )

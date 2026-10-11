@@ -200,8 +200,9 @@ def resolve_overlay(rgb_u8, nodes, exclusion, panel, label_ids=False, scale=1):
 
     Particles green (truncated ones marked "T"), cavities magenta, orphans
     dashed magenta, spots yellow, gaps blue, specks gray, rejected red dashed,
-    aggregates thick white, exclusion red at 30%; duplicates and ``background``
-    are not drawn. A colour key is appended below the image. With
+    aggregates thick white, exclusion red at 30%; duplicates, ``background``
+    and dropped virtual parents (v4 ``R-SYNTH-DROP``: a background hole, not a
+    proposed mask) are not drawn. A colour key is appended below the image. With
     ``label_ids`` each outline is tagged with its ``node_id`` (the row in
     ``roles.csv``) and the image is upscaled by ``scale`` for legibility.
     """
@@ -222,6 +223,8 @@ def resolve_overlay(rgb_u8, nodes, exclusion, panel, label_ids=False, scale=1):
         color, width, dashed = _ROLE_STYLE[role]
         width = width * scale if role == "aggregate" else max(1, scale // 2)
         for node in by_role.get(role, []):
+            if node.get("virtual") and role != "aggregate":
+                continue
             mask = np.asarray(node["filled"], dtype=np.uint8)
             if scale != 1:
                 mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)

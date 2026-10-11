@@ -5,11 +5,15 @@ hand-built masks. Nodes go through the real Step-2 post-processing and Step-3
 graph, so features and relations are computed exactly as in the pipeline.
 """
 
+import copy
+
 import numpy as np
+import pandas as pd
+from scipy import ndimage
 from skimage.draw import polygon
 
 from lnpsam import graph, proposals, resolve
-from toys import BG, CAVITY, CFG, PARTICLE, SHAPE
+from toys import BG, CAVITY, CFG, PARTICLE, SEED_CENTERS, SEED_R, SHAPE
 from toys import build_panel as _panel
 from toys import by_id as _by_id
 from toys import cfg_with as _cfg
@@ -287,3 +291,72 @@ def test_frame_filling_particle_is_not_background():
 
     original, ids = _panel(draw, [big, pore], with_seeds=False, cfg=_cfg(frame_particle=False))
     assert _roles(original, ids)[0] == "background"
+
+
+# --------------------------------------------------------------------------- #
+# v4 synth_parents: background holes as virtual aggregate parents
+# --------------------------------------------------------------------------- #
+_FIVE = [(50, 50), (50, 85), (50, 120), (85, 67), (85, 102)]
+
+
+def _background(*holes):
+    """A SAM background mask: the whole panel except ``holes`` and the seeds."""
+    seeds = [_disk(c, SEED_R) for c in SEED_CENTERS]
+    return ~np.logical_or.reduce([*holes, *seeds])
+
+
+def _five_disk_blob():
+    disks = [_disk(c, 16) for c in _FIVE]
+    blob = np.logical_or.reduce([_disk(c, 20) for c in _FIVE])
+    return blob, disks
+
+
+def test_background_hole_is_virtual_aggregate():
+    """v4: 5 disks in a background hole, no blob mask -> 1 aggregate, 5 members."""
+    blob, disks = _five_disk_blob()
+    result, ids = _panel([(blob, PARTICLE)], disks + [_background(blob)])
+    aggregates = [n for n in result.nodes if n["role"] == "aggregate"]
+    assert len(aggregates) == 1
+    agg = aggregates[0]
+    assert (agg["virtual"], agg["source"], agg["rule_id"]) == (True, "synth_bg_hole", "R-SYNTH-AGG")
+    assert np.array_equal(agg["filled"], ndimage.binary_fill_holes(blob))
+    nodes = _by_id(result)
+    for i in ids[:5]:
+        assert (nodes[i]["role"], nodes[i]["aggregate_id"]) == ("particle", agg["node_id"])
+    assert nodes[ids[5]]["role"] == "background"
+    # The seeds are holes too; each holds one particle, so C-AGG drops it.
+    assert result.panel["synth_parents"] == {
+        "n_bg_holes": 4, "n_enclosed": 0, "n_virtual": 4, "n_synth_agg": 1, "n_synth_drop": 3,
+    }
+
+
+def test_background_hole_without_aggregate_is_dropped():
+    """v4: a hole holding two particles fails C-AGG; its children type as without it."""
+    a, b = _disk((60, 50), 20), _disk((60, 90), 20)
+    pair = _disk((60, 50), 22) | _disk((60, 90), 22)
+    masks = [a, b, _background(pair)]
+    on, ids = _panel([(pair, PARTICLE)], masks)
+    off, _ = _panel([(pair, PARTICLE)], masks, cfg=_cfg(synth_parents=False))
+    hole = next(n for n in on.nodes if n["virtual"] and np.array_equal(n["filled"], pair))
+    assert (hole["role"], hole["rule_id"], hole["children"]) == ("rejected", "R-SYNTH-DROP", [])
+    assert _by_id(on)[ids[0]]["graph_parent"] == hole["node_id"]
+    # Every SAM node keeps its v3 role and values; only the Step-3 parent differs.
+    off_table = resolve.roles_table(off)
+    on_table = resolve.roles_table(on)
+    on_table = on_table[on_table["node_id"].isin(off_table["node_id"])].reset_index(drop=True)
+    columns = [c for c in off_table.columns if c != "graph_parent"]
+    pd.testing.assert_frame_equal(on_table[columns], off_table[columns])
+
+
+def test_synth_parents_off_is_v3():
+    """v4 switch off: no virtual nodes, and the same output as a config without the key."""
+    blob, disks = _five_disk_blob()
+    draw, masks = [(blob, PARTICLE)], disks + [_background(blob)]
+    off, _ = _panel(draw, masks, cfg=_cfg(synth_parents=False))
+    v3_cfg = copy.deepcopy(CFG)
+    del v3_cfg["resolve"]["synth_parents"]
+    v3, _ = _panel(draw, masks, cfg=v3_cfg)
+    assert not any("virtual" in n for n in off.nodes)
+    assert off.panel["role_counts"]["aggregate"] == 0
+    assert off.panel == v3.panel
+    pd.testing.assert_frame_equal(resolve.roles_table(off), resolve.roles_table(v3))

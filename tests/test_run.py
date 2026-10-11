@@ -118,7 +118,10 @@ def test_steps_1_to_6_write_outputs_and_skip_sam_on_rerun(tmp_path, monkeypatch)
     roles = pd.read_csv(out_dir / "resolve" / "toy_panel__roles.csv")
     assert roles["role"].notna().all() and roles["rule_id"].notna().all()
     nodes = pd.read_parquet(out_dir / "resolve" / "toy_panel__nodes.parquet")
-    assert set(nodes["role"]) == {"particle", "background"}
+    sam = nodes[~nodes["virtual"]]
+    assert set(sam["role"]) == {"particle", "background"}
+    # v4: the particle is a hole in the background mask; one member, so C-AGG drops it.
+    assert set(nodes.loc[nodes["virtual"], "rule_id"]) == {"R-SYNTH-DROP"}
 
     # Final results (measure/, spec 10 v3): only what is reported.
     measure = out_dir / "measure"

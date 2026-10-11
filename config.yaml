@@ -74,6 +74,7 @@ resolve:
   particle: {edge_min: 0.25, quality_min: 0.70, max_area_frac: 0.25}
   large_round: {enabled: true, circularity: 0.75, solidity: 0.90}  # 8.3 (v3 D): large round solid mask -> particle, not R-LARGE
   frame_particle: true        # 8.1 (v3 F): round solid bg_candidate on the particle side is a particle, not background
+  synth_parents: true         # 8.4 (v4): holes in a bg_candidate mask become virtual parents typed by C-AGG alone (false = v3)
   min_particle_nm: 10         # PI to confirm
   speck_rel_d: 0.20           # used when uncalibrated
   split: {max_children: 3, r_min: 0.45, coverage_min: 0.70}

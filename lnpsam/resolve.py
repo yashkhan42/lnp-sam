@@ -53,6 +53,17 @@ restores the original rule):
   the particle side of the rest of the content (brighter on SEM, darker on TEM)
   is one particle filling the frame, not background. Its flag is cleared and
   the Step-3 graph is rebuilt so it can parent its pore (8.1 step 0).
+
+v4 amendment (switch ``synth_parents``; false restores v3 exactly):
+- Background holes as aggregate parents. SAM may never propose a whole-cluster
+  mask, so C-AGG has no parent. After 8.1 (whose statistics are not
+  recomputed), every hole in the unfilled mask of a node still flagged
+  ``bg_candidate`` becomes a ``virtual`` node, and the Step-3 relations are
+  rebuilt so the SAM masks inside it become its children. A virtual node skips
+  8.3 and is typed by C-AGG alone: ``aggregate`` (``R-SYNTH-AGG``) or
+  ``rejected`` (``R-SYNTH-DROP``, children re-rooted). A hole that already lies
+  inside another mask (7.3) is not inserted. Virtual outlines are not
+  observations, so they never enter another node's ring or contact (8.2).
 """
 
 from __future__ import annotations
@@ -64,9 +75,17 @@ import math
 import numpy as np
 import pandas as pd
 from scipy import ndimage
+from skimage.filters import gaussian, sobel
 from skimage.segmentation import find_boundaries
 
 from . import graph as graph_mod
+from . import io as lnp_io
+from . import proposals as proposals_mod
+
+# v4 virtual parents: Step-2 source and rule ids.
+SYNTH_SOURCE = "synth_bg_hole"
+SYNTH_AGG_RULE = "R-SYNTH-AGG"
+SYNTH_DROP_RULE = "R-SYNTH-DROP"
 
 # Literal values from the spec text (not tunable thresholds).
 _BG_DILATE_PX = 2  # 8.1 step 2: dilate the union of representatives by 2 px
@@ -183,6 +202,83 @@ def _regraph_without_bg_flag(graph_result, node_ids, cfg):
             node["bg_candidate"] = False
         nodes.append(node)
     return graph_mod.run_graph(nodes, cfg)
+
+
+def bg_hole_nodes(reps, gray, content_mask, first_id):
+    """v4: one virtual node per hole in the unfilled mask of each ``bg_candidate``.
+
+    A hole is an 8-connected component (as in 6.2.1) of
+    ``fill(mask) & ~mask & content_mask``; its outline is the hole,
+    hole-filled. Features follow 6.3 on the filled
+    outline. It has no SAM scores, so ``predicted_iou``, ``stability_score``
+    and ``quality`` are NaN. ``binary_fill_holes`` only closes regions the mask
+    encloses, so a hole never reaches the content-box edge and the full panel
+    stands in for the content box in ``touches_border``.
+    """
+    bg = sorted((n for n in reps if n["bg_candidate"]), key=lambda n: n["node_id"])
+    if not bg:
+        return []
+    gradient = sobel(gaussian(gray, sigma=1, preserve_range=True))
+    gradient_scale = float(np.percentile(gradient[content_mask], 95))
+    height, width = gray.shape
+    found = []
+    for n in bg:
+        own = np.asarray(n.get("mask", n["filled"]), dtype=bool)
+        holes = ndimage.binary_fill_holes(own) & ~own
+        clipped = holes & ~content_mask  # hole pixels under removed furniture
+        labels, count = ndimage.label(holes & content_mask, structure=proposals_mod._EIGHT_CONNECTED)
+        for k in range(1, count + 1):
+            hole = labels == k
+            filled = ndimage.binary_fill_holes(hole)
+            excl_overlap = float((filled & ~content_mask).sum() / filled.sum())
+            # 8.5: an outline that runs along clipped pixels borders the exclusion.
+            touches_exclusion = excl_overlap > 0.0 or bool(
+                (ndimage.binary_dilation(filled, structure=proposals_mod._EIGHT_CONNECTED) & clipped).any()
+            )
+            node = {
+                "node_id": first_id + len(found),
+                "sam_annotation_id": -1,
+                "piece_index": 0,
+                "mask": hole,
+                "filled": filled,
+                "predicted_iou": math.nan,
+                "stability_score": math.nan,
+                "point_coords": [],
+                "source": SYNTH_SOURCE,
+                "virtual": True,
+                "synth_from": n["node_id"],
+                "rle": lnp_io.encode_rle(hole),
+                "filled_rle": lnp_io.encode_rle(filled),
+                "n_holes": proposals_mod._hole_count(hole, filled),
+                "excl_overlap": excl_overlap,
+                "touches_exclusion": touches_exclusion,
+                "bg_candidate": False,
+            }
+            proposals_mod._node_features(node, gray, gradient, gradient_scale, (0, 0, width, height))
+            node.pop("_edge_hits")
+            found.append(node)
+    return found
+
+
+def insert_synth_parents(graph_result, reps, gray, content_mask, cfg):
+    """v4: add the background holes of ``reps`` to the graph as virtual parents.
+
+    Returns the rebuilt graph and its counts for resolve.json. A virtual node
+    is only ever a root, so a hole that the rebuilt graph puts inside another
+    mask (7.3: a SAM mask, or a larger hole of another background mask) is not
+    inserted; that mask already encloses it.
+    """
+    first_id = max((n["node_id"] for n in graph_result.nodes), default=-1) + 1
+    holes = bg_hole_nodes(reps, gray, content_mask, first_id)
+    rebuilt = graph_mod.add_virtual_nodes(graph_result, holes, cfg)
+    enclosed = {n["node_id"] for n in rebuilt.nodes if n.get("virtual") and n["parent"] is not None}
+    if enclosed:
+        rebuilt = graph_mod.add_virtual_nodes(
+            graph_result, [v for v in holes if v["node_id"] not in enclosed], cfg
+        )
+    counts = {"n_bg_holes": len(holes), "n_enclosed": len(enclosed),
+              "n_virtual": len(holes) - len(enclosed)}
+    return rebuilt, counts
 
 
 def _select_seeds(reps, seed_cfg, content_area):
@@ -308,8 +404,11 @@ def node_values(reps, gray, content_mask, stats, rcfg, adjacent_px):
     def rho(pixels):
         return float((pixels.mean() - mu_bg) / (mu_p - mu_bg)) if pixels.size else math.nan
 
-    index = _BoxIndex(reps)
-    non_bg = _BoxIndex([n for n in reps if not n["bg_candidate"]])
+    # v4: virtual outlines are not observations; they never enter another
+    # node's ring or contact.
+    observed = [n for n in reps if not n.get("virtual", False)]
+    index = _BoxIndex(observed)
+    non_bg = _BoxIndex([n for n in observed if not n["bg_candidate"]])
     windows = {}
 
     for n in reps:
@@ -449,6 +548,9 @@ class _Resolver:
         while self.queue:
             n = self.by_id[self.queue.popleft()]
             n["parent"] = None
+            if n.get("virtual", False):
+                self.type_virtual(n)  # v4: skips 8.3
+                continue
             role, rule_id = root_rule(n, self.stats, self.rcfg)
             if role == "orphan":
                 n["subtype"] = "cavity" if n["rho_in"] < self.rcfg["rho_particle_min"] else "core"
@@ -486,13 +588,8 @@ class _Resolver:
         shell = p["filled"][y0:y1, x0:x1] & ~inner
         return self.rho(self.gray[y0:y1, x0:x1][shell])
 
-    def type_children(self, p):
-        """Spec 8.4 on a particle or aggregate ``p``: group rules, then each child."""
-        pid = p["node_id"]
-        children = [self.by_id[c] for c in self.kids[pid]]
-        if not children:
-            return
-        split, agg = self.rcfg["split"], self.rcfg["aggregate"]
+    def group(self, p, children):
+        """8.4 group of ``p``'s children: ``(members, group, coverage)``."""
         for c in children:
             c["r"], c["delta"] = self.geometry(p, c)
 
@@ -507,6 +604,47 @@ class _Resolver:
             group = children
         cov = self.coverage(p, group) if group else 0.0
         p["coverage"] = cov
+        return members, group, cov
+
+    def c_agg(self, members, cov):
+        agg = self.rcfg["aggregate"]
+        return len(members) >= agg["min_children"] and cov >= agg["coverage_min"]
+
+    def aggregate(self, p, children, members, rule_id):
+        """C-AGG: ``p`` -> aggregate, its members -> particles. Returns the other children."""
+        self.set_role(p, "aggregate", rule_id)
+        for c in members:
+            self.set_role(c, "particle", "C-AGG")
+            c["aggregate_id"] = p["node_id"]
+        for c in members:
+            self.type_children(c)
+        return [c for c in children if c not in members]
+
+    def type_virtual(self, v):
+        """v4: a virtual parent is typed by C-AGG alone (no 8.3, no C-SPLIT).
+
+        Otherwise it is dropped and its children become roots (8.3 re-rooting).
+        """
+        vid = v["node_id"]
+        children = [self.by_id[c] for c in self.kids[vid]]
+        members, _, cov = self.group(v, children)
+        if self.c_agg(members, cov):
+            self.type_each_child(v, self.aggregate(v, children, members, SYNTH_AGG_RULE))
+            return
+        self.set_role(v, "rejected", SYNTH_DROP_RULE)
+        for c in children:
+            c["r"] = c["delta"] = None  # measured against the dropped outline
+            self.queue.append(c["node_id"])
+        self.kids[vid] = []
+
+    def type_children(self, p):
+        """Spec 8.4 on a particle or aggregate ``p``: group rules, then each child."""
+        pid = p["node_id"]
+        children = [self.by_id[c] for c in self.kids[pid]]
+        if not children:
+            return
+        split = self.rcfg["split"]
+        members, group, cov = self.group(p, children)
 
         # C-SPLIT: the parent was 2-3 touching particles merged into one mask.
         if (
@@ -526,14 +664,8 @@ class _Resolver:
 
         remaining = children
         # C-AGG: many particle-like children covering enough of the parent.
-        if len(members) >= agg["min_children"] and cov >= agg["coverage_min"]:
-            self.set_role(p, "aggregate", "C-AGG")
-            for c in members:
-                self.set_role(c, "particle", "C-AGG")
-                c["aggregate_id"] = pid
-            for c in members:
-                self.type_children(c)
-            remaining = [c for c in children if c not in members]
+        if self.c_agg(members, cov):
+            remaining = self.aggregate(p, children, members, "C-AGG")
 
         self.type_each_child(p, remaining)
 
@@ -718,17 +850,19 @@ def run_resolve(graph_result, gray, content_mask, modality, nm_per_px, cfg):
     if frame_ids:
         graph_result = _regraph_without_bg_flag(graph_result, set(frame_ids), cfg)
 
-    nodes = [dict(n) for n in graph_result.nodes]
-    for n in nodes:
-        n["frame_particle"] = n["node_id"] in frame_ids
-        if not n["is_representative"]:
-            n["role"] = "duplicate"
-            n["rule_id"] = "G-DUP"
-    reps = [n for n in nodes if n["is_representative"]]
-
+    nodes, reps = _working_nodes(graph_result, frame_ids)
     stats = panel_statistics(reps, gray, content_mask, modality, nm_per_px, rcfg)
     if frame_ids:
         stats["flags"].append("FRAME_PARTICLE")
+
+    # v4: background holes become virtual parents after 8.1, whose statistics
+    # stay as computed on the original graph.
+    synth = None
+    if rcfg.get("synth_parents", False):
+        graph_result, synth = insert_synth_parents(graph_result, reps, gray, content_mask, cfg)
+        nodes, reps = _working_nodes(graph_result, frame_ids)
+        for n in nodes:
+            n["virtual"] = bool(n.get("virtual", False))
     log = []
     if reps:
         node_values(reps, gray, content_mask, stats, rcfg, adjacent_px)
@@ -745,7 +879,22 @@ def run_resolve(graph_result, gray, content_mask, modality, nm_per_px, cfg):
     stats["n_touches_exclusion"] = sum(
         n["touches_exclusion"] for n in reps if n["role"] == "particle"
     )
+    if synth is not None:
+        synth["n_synth_agg"] = sum(n["rule_id"] == SYNTH_AGG_RULE for n in nodes)
+        synth["n_synth_drop"] = sum(n["rule_id"] == SYNTH_DROP_RULE for n in nodes)
+        stats["synth_parents"] = synth
     return ResolveResult(nodes=nodes, panel=stats, log=log)
+
+
+def _working_nodes(graph_result, frame_ids):
+    """Step-4 shallow copies of the graph nodes, duplicates typed; ``(nodes, reps)``."""
+    nodes = [dict(n) for n in graph_result.nodes]
+    for n in nodes:
+        n["frame_particle"] = n["node_id"] in frame_ids
+        if not n["is_representative"]:
+            n["role"] = "duplicate"
+            n["rule_id"] = "G-DUP"
+    return nodes, [n for n in nodes if n["is_representative"]]
 
 
 _TABLE_COLUMNS = (
