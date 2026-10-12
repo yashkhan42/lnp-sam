@@ -1,10 +1,9 @@
 # Step-2 cache fixes — implementation spec
 
-**For:** the coding agent working in this repo.
 **Scope:** `lnpsam/proposals.py`, `lnpsam/run.py`, `lnpsam/__init__.py`, `config.yaml`, `tests/test_proposals.py`, `tests/test_run.py`, the two spec docs.
 **Not in scope:** anything that changes what Step 2 produces. Same inputs must give the same nodes before and after.
 
-> **Yash, before handing this over:** compute the checkpoint hash on the HPC and paste it into §2.1:
+> The checkpoint hash in §2.1 comes from the HPC copy of the model:
 > `sha256sum /lustre/work/tkhanyas/weights/sam_vit_b_01ec64.pth`
 
 ---
@@ -19,8 +18,8 @@
 
 ## 1. Ground rules
 
-1. As of 2026-10-10, `main` has **uncommitted changes** in `LNP-SAM_MVP_SPEC.md`, `config.yaml`, `lnpsam/graph.py`, `lnpsam/overlay.py`, `lnpsam/resolve.py`, `tests/test_resolve.py`, `tests/test_run.py`. Ask Yash whether to commit them first. Never discard them or fold them into this work's commits.
-2. Work on a new branch `step2-cache-portability`. Do not merge; Yash reviews.
+1. As of 2026-10-10, `main` has **uncommitted changes** in `LNP-SAM_MVP_SPEC.md`, `config.yaml`, `lnpsam/graph.py`, `lnpsam/overlay.py`, `lnpsam/resolve.py`, `tests/test_resolve.py`, `tests/test_run.py`. Commit them separately first. Never discard them or fold them into this work's commits.
+2. Work on a new branch `step2-cache-portability`; merge only after review.
 3. Run `pytest` before changing anything and record the result. Everything that passed must still pass at the end.
 4. Step-2 node output must not change (verify per §7).
 5. No new third-party dependencies. Stdlib only (`hashlib`, `time`, `platform`, `subprocess`, `datetime`).
@@ -40,7 +39,7 @@ Add under `sam:` in `config.yaml`:
   checkpoint_sha256: <PASTE>   # sha256 of sam_vit_b_01ec64.pth; identifies the model in the cache key
 ```
 
-If the value is still `<PASTE>`, stop and ask Yash. Do not copy a hash from the internet.
+The value must be computed from the HPC copy of the checkpoint (see the note at the top), not copied from elsewhere.
 
 `sam.checkpoint` (the path) stays. It says where *this* machine finds the file and may differ per machine.
 
@@ -246,7 +245,7 @@ Assert: particles are written; `proposals_validated` is True; `device == "cuda"`
 - [ ] Both spec docs updated.
 - [ ] Four commits on `step2-cache-portability` (F1, F2, F3, docs); not merged.
 
-## 8. After merge (Yash, manual)
+## 8. After merge (manual)
 
 1. Re-upload the repo to the HPC as usual.
 2. Rerun Step 2 for all panels on the HPC. Every cache misses once, by design.

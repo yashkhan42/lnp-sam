@@ -10,7 +10,7 @@ import threading
 import numpy as np
 import pandas as pd
 from PIL import Image
-from PySide6.QtCore import QLocale, QSettings, Qt
+from PySide6.QtCore import QLocale, QSettings
 from PySide6.QtWidgets import QApplication
 import pytest
 import yaml
