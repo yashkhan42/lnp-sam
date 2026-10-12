@@ -43,6 +43,7 @@ cleanup:
 
 sam:
   checkpoint: sam_vit_b_01ec64.pth
+  checkpoint_sha256: ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912 # measured on TTU HPC; identifies the model in the cache key
   points_per_side: 64
   points_per_batch: 128
   pred_iou_thresh: 0.80       # NP-SAM: 0.88

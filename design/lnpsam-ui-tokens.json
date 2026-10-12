@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "status": "design-only",
+  "appearance": "fixed-dark",
+  "sources": {
+    "ttu_digital": "https://www.ttu.edu/brand/websites/index.php",
+    "ttu_visual_identity": "https://www.ttu.edu/brand/visual-identity/"
+  },
+  "font": {
+    "local_family_order": ["Inter", "Helvetica Neue", "Tahoma", "Arial", "Qt GeneralFont"],
+    "download_required": false,
+    "reference_logical_px": {"product": 18, "pane_heading": 15, "section_heading": 13, "body": 13, "secondary": 12, "chart_tick": 12},
+    "weights": {"body": "regular", "heading": "semibold"}
+  },
+  "colors": {
+    "brand.scarlet": "#E90802",
+    "brand.black": "#000000",
+    "brand.white": "#FFFFFF",
+    "surface.window": "#121214",
+    "surface.panel": "#1B1B1F",
+    "surface.field": "#222226",
+    "surface.hover": "#2A2A30",
+    "surface.pressed": "#151517",
+    "surface.selected": "#37373F",
+    "surface.viewer": "#0B0B0D",
+    "border.divider": "#44444B",
+    "border.control": "#707078",
+    "text.primary": "#EDEDED",
+    "text.secondary": "#B5B5BD",
+    "text.hint": "#93939F",
+    "text.disabled": "#777780",
+    "action.hover": "#C90702",
+    "action.pressed": "#AA0602",
+    "focus": "#E90802",
+    "focus.on_selected": "#EDEDED",
+    "warning.background": "#30291C",
+    "warning.foreground": "#E9C46A",
+    "error.background": "#361B1D",
+    "error.foreground": "#FFB4B0"
+  },
+  "geometry_logical_px": {
+    "window_default": [1280, 840],
+    "window_minimum": [1024, 720],
+    "toolbar_height": 44,
+    "input_rail_default": 296,
+    "input_rail_limits": [264, 360],
+    "splitter_handle": 6,
+    "pane_padding": 16,
+    "group_gap": 24,
+    "control_gap": 8,
+    "control_height_minimum": 32,
+    "run_height_minimum": 40,
+    "corner_radius": 3,
+    "tab_height_minimum": 32,
+    "viewer_height_minimum": 220,
+    "analysis_height_minimum": 160,
+    "table_row_height_minimum": 28,
+    "status_height_minimum": 28
+  },
+  "resource_targets": {
+    "targets_are_measured": false,
+    "app_owned_animation_timers": 0,
+    "progress_cosmetic_update_hz_maximum": 5,
+    "display_image_cache_mib_maximum": 64,
+    "matplotlib_canvases": 1,
+    "startup_seconds_target": 2,
+    "gui_only_incremental_rss_mib_target": 200,
+    "sam_wall_time_overhead_percent_target": 5,
+    "web_engine_required": false,
+    "opengl_viewport_required": false
+  }
+}

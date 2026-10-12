@@ -1,0 +1,24 @@
+# Desktop / remote app dependencies, pinned to the versions tested here.
+PySide6==6.12.0
+matplotlib==3.11.2
+requests==2.34.2
+fastapi==0.143.0
+uvicorn==0.54.0
+python-multipart==0.0.32
+
+# Existing pipeline dependencies. Install platform-specific torch/CUDA wheels
+# first when needed; these pins match the development environment.
+numpy==2.4.6
+scipy==1.17.1
+scikit-image==0.26.0
+opencv-python-headless==5.0.0.93
+pandas==3.0.6
+pyarrow==25.0.1
+pycocotools==2.0.11
+easyocr==1.7.2
+PyYAML==6.0.3
+torch==2.14.0
+torchvision==0.29.0
+segment-anything==1.0
+Pillow==12.3.0
+tifffile==2026.3.3

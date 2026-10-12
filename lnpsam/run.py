@@ -10,8 +10,9 @@ every consumed input is unchanged.
 
 ``--proposals-from DIR`` reuses Step-2 nodes produced elsewhere (e.g. on the
 HPC): for each panel it loads ``proposals/<panel_id>__nodes.parquet`` found
-anywhere under DIR, as-is, and never loads SAM. Steps 1, 3, 4 and 6 run
-locally.
+anywhere under DIR only when its cache key matches the local Step 1 and SAM
+settings, and never loads SAM. ``--allow-stale-proposals`` permits reuse of a
+single mismatched candidate with a warning. Steps 1, 3, 4 and 6 run locally.
 
 Outputs under ``--out``:
 
@@ -28,9 +29,11 @@ Outputs under ``--out``:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import glob
 import json
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -53,8 +56,51 @@ def _write_png(path, rgb_u8):
     cv2.imwrite(path, cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR))
 
 
-def find_proposal_nodes(proposals_from, panel_id):
-    """The Step-2 nodes file for ``panel_id`` under ``proposals_from``.
+def _proposal_meta_path(nodes_path):
+    return os.fspath(nodes_path).removesuffix("__nodes.parquet") + "__meta.json"
+
+
+def _read_proposal_meta(nodes_path):
+    """Treat missing or unreadable source metadata as unvalidated proposals."""
+    try:
+        with open(_proposal_meta_path(nodes_path)) as stream:
+            metadata = json.load(stream)
+        return metadata if isinstance(metadata, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _proposal_created_time(metadata):
+    """Order matching runs by creation time; unknown times sort oldest."""
+    try:
+        created = datetime.fromisoformat(metadata["created_utc"].replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created.timestamp()
+    except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return float("-inf")
+
+
+def _stale_proposal_reason(metadata, expected_digests):
+    if not metadata:
+        return "no __meta.json"
+    if "key_schema" not in metadata:
+        return "made by an older LNP-SAM (no key_schema); rerun Step 2"
+    if metadata["key_schema"] != proposals_mod._KEY_SCHEMA:
+        return f"unsupported key_schema {metadata['key_schema']!r}; rerun Step 2"
+    digests = metadata.get("input_digests")
+    if not isinstance(digests, dict):
+        digests = {}
+    different = [name for name, value in expected_digests.items() if digests.get(name) != value]
+    if different:
+        return "differs in: " + ", ".join(different)
+    return "cache_key does not match (input digests match)"
+
+
+def select_proposal_nodes(
+    proposals_from, panel_id, expected_key, expected_digests, allow_stale=False
+):
+    """Select a matching Step-2 run, or explicitly override one stale candidate.
 
     Only files inside a ``proposals/`` directory count (Step 6 writes its own
     ``<panel_id>__nodes.parquet`` under ``measure/``).
@@ -63,18 +109,36 @@ def find_proposal_nodes(proposals_from, panel_id):
     hits = sorted(glob.glob(pattern, recursive=True))
     if not hits:
         raise FileNotFoundError(f"no proposals/{panel_id}__nodes.parquet under {proposals_from}")
-    return hits[0]
+    candidates = [(path, _read_proposal_meta(path)) for path in hits]
+    matches = [
+        candidate for candidate in candidates
+        if candidate[1].get("key_schema") == proposals_mod._KEY_SCHEMA
+        and candidate[1].get("cache_key") == expected_key
+    ]
+    if matches:
+        path, metadata = max(matches, key=lambda candidate: _proposal_created_time(candidate[1]))
+        if len(matches) > 1:
+            print(f"    {panel_id}: selected newest matching proposals from {path}")
+        return path, metadata, True
+    if allow_stale and len(candidates) == 1:
+        path, metadata = candidates[0]
+        reason = _stale_proposal_reason(metadata, expected_digests)
+        print(f"WARNING: {panel_id}: using stale proposals from {path}: {reason}")
+        return path, metadata, False
+
+    lines = [f"Stale proposals for panel {panel_id}:"]
+    lines.extend(f"  {path}: {_stale_proposal_reason(meta, expected_digests)}" for path, meta in candidates)
+    if allow_stale:
+        lines.append("More than one candidate exists; point DIR at a single run before using --allow-stale-proposals.")
+    lines.append("Rerun Step 2 for this panel, or pass --allow-stale-proposals to use it anyway.")
+    raise proposals_mod.StaleProposalsError("\n".join(lines))
 
 
-def load_proposal_nodes(path):
+def load_proposal_nodes(path, metadata=None):
     """Step-2 nodes from a nodes.parquet written by Step 2, plus its metadata."""
     frame = pd.read_parquet(path)
     nodes = [proposals_mod._cache_record_to_node(r) for r in frame.to_dict(orient="records")]
-    meta_path = path.replace("__nodes.parquet", "__meta.json")
-    meta = {}
-    if os.path.isfile(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
+    meta = _read_proposal_meta(path) if metadata is None else metadata
     return nodes, meta
 
 
@@ -96,12 +160,18 @@ def run_cleanup_stage(
     run_step6=False,
     device="auto",
     proposals_from=None,
+    allow_stale_proposals=False,
+    progress=None,
 ):
     """Run Step 1, optionally followed by cached Step 2, then Steps 3, 4 and 6.
 
-    With ``proposals_from``, Step 2 loads existing nodes (see
-    :func:`find_proposal_nodes`) instead of running SAM.
+    With ``proposals_from``, Step 2 validates existing nodes against the local
+    Step-1 result (see :func:`select_proposal_nodes`) instead of running SAM.
+    ``progress(index, total, panel_id, stage)`` runs at each stage boundary;
+    indices are one-based, and exceptions from the callback propagate.
     """
+    if allow_stale_proposals and not proposals_from:
+        raise ValueError("allow_stale_proposals requires proposals_from")
     if run_step3 and not run_step2:
         raise ValueError("Step 3 requires Step 2 nodes; set run_step2=True")
     if run_step4 and not run_step3:
@@ -142,7 +212,9 @@ def run_cleanup_stage(
         nonlocal sam_model, mask_generator
         if mask_generator is None:
             print(f"[lnpsam] Loading SAM ViT-B checkpoint: {checkpoint}")
-            sam_model = proposals_mod.load_sam_model(checkpoint, resolved_device)
+            sam_model = proposals_mod.load_sam_model(
+                checkpoint, resolved_device, expected_sha256=cfg["sam"]["checkpoint_sha256"]
+            )
             mask_generator = proposals_mod.make_mask_generator(sam_model, cfg["sam"])
         return mask_generator
 
@@ -158,12 +230,14 @@ def run_cleanup_stage(
     resolve_rows = []
     particle_frames = []
     panel_rows = []
-    for _, row in manifest.iterrows():
+    for image_index, (_, row) in enumerate(manifest.iterrows(), start=1):
         panel_id = row["panel_id"]
         image_path = row["image_path"]
         modality = row["modality"]
         manifest_nm = row.get("nm_per_px", np.nan)
 
+        if progress is not None:
+            progress(image_index, len(manifest), panel_id, "cleanup")
         gray, rgb_u8 = lnp_io.load_image(image_path)
         H, W = gray.shape
 
@@ -210,17 +284,19 @@ def run_cleanup_stage(
         )
         print(f"  {panel_id}: cal={cal}, excl={excl_frac:.3f}, bars={len(result.bars)}")
 
+        if run_step2 and progress is not None:
+            progress(image_index, len(manifest), panel_id, "proposals")
         if run_step2 and proposals_from:
-            nodes_path = find_proposal_nodes(proposals_from, panel_id)
-            nodes, proposal_meta = load_proposal_nodes(nodes_path)
-            meta_path = nodes_path.replace("__nodes.parquet", "__meta.json")
+            expected_key = proposals_mod.proposal_cache_key(gray, result, cfg["sam"])
+            expected_digests = proposals_mod.proposal_input_digests(gray, result, cfg["sam"])
+            nodes_path, proposal_meta, proposals_validated = select_proposal_nodes(
+                proposals_from, panel_id, expected_key, expected_digests, allow_stale_proposals
+            )
+            nodes, proposal_meta = load_proposal_nodes(nodes_path, proposal_meta)
+            meta_path = _proposal_meta_path(nodes_path)
             cache_hit = None
-            proposal_meta = {
-                "cache_key": proposal_meta.get("cache_key"),
-                "n_raw_masks": proposal_meta.get("n_raw_masks"),
-                "n_nodes": len(nodes),
-            }
-            print(f"    proposals={len(nodes)} (reused from {nodes_path})")
+            proposal_device = proposal_meta.get("device")
+            print(f"    proposals={len(nodes)} (reused from {nodes_path}, validated={proposals_validated})")
         elif run_step2:
             nodes, cache_hit, proposal_meta = proposals_mod.run_proposals_cached(
                 gray=gray,
@@ -228,7 +304,6 @@ def run_cleanup_stage(
                 cfg=cfg,
                 panel_id=panel_id,
                 cache_dir=proposals_dir,
-                checkpoint=checkpoint,
                 device=resolved_device,
                 mask_generator_factory=get_mask_generator,
             )
@@ -237,6 +312,8 @@ def run_cleanup_stage(
             nodes_path, meta_path = proposals_mod.proposal_cache_paths(
                 proposals_dir, panel_id
             )
+            proposals_validated = True
+            proposal_device = resolved_device
         if run_step2:
             proposal_overlay_path = os.path.join(
                 proposals_dir, f"{panel_id}__overlay.png"
@@ -249,11 +326,17 @@ def run_cleanup_stage(
                 {
                     "panel_id": panel_id,
                     "paper_id": row["paper_id"],
-                    "device": resolved_device,
+                    "device": proposal_device,
                     "cache_hit": cache_hit,
-                    "cache_key": proposal_meta["cache_key"],
-                    "n_raw_masks": proposal_meta["n_raw_masks"],
-                    "n_nodes": proposal_meta["n_nodes"],
+                    "cache_key": proposal_meta.get("cache_key"),
+                    "n_raw_masks": proposal_meta.get("n_raw_masks"),
+                    "n_nodes": len(nodes),
+                    "proposals_validated": proposals_validated,
+                    "proposals_source": str(nodes_path),
+                    "step2_seconds": (
+                        proposal_meta["timing"].get("total_s")
+                        if isinstance(proposal_meta.get("timing"), dict) else None
+                    ),
                     "nodes_path": str(nodes_path),
                     "meta_path": str(meta_path),
                     "overlay_path": proposal_overlay_path,
@@ -261,6 +344,8 @@ def run_cleanup_stage(
             )
 
             if run_step3:
+                if progress is not None:
+                    progress(image_index, len(manifest), panel_id, "graph")
                 graph_result = graph_mod.run_graph(nodes, cfg)
                 duplicate_count = len(nodes) - len(graph_result.representative_ids)
                 adjacency_count = sum(
@@ -280,6 +365,8 @@ def run_cleanup_stage(
                 )
 
             if run_step4:
+                if progress is not None:
+                    progress(image_index, len(manifest), panel_id, "resolve")
                 resolved = resolve_mod.run_resolve(
                     graph_result, gray, result.content_mask, modality, result.nm_per_px, cfg
                 )
@@ -311,6 +398,8 @@ def run_cleanup_stage(
                 )
 
             if run_step6:
+                if progress is not None:
+                    progress(image_index, len(manifest), panel_id, "measure")
                 measured = measure_mod.run_measure(
                     resolved, panel_id, row["paper_id"], result.nm_per_px,
                     result.cal_source, cfg,
@@ -372,9 +461,17 @@ def main(argv=None):
         "--proposals-from",
         default=None,
         help="Reuse Step-2 nodes from proposals/<panel_id>__nodes.parquet under this "
-        "directory (e.g. an HPC run) instead of running SAM",
+        "directory (e.g. an HPC run) only when their cache key matches local Step 1 "
+        "and config, instead of running SAM",
+    )
+    parser.add_argument(
+        "--allow-stale-proposals",
+        action="store_true",
+        help="Allow one mismatched Step-2 candidate under --proposals-from, with a warning",
     )
     args = parser.parse_args(argv)
+    if args.allow_stale_proposals and not args.proposals_from:
+        parser.error("--allow-stale-proposals requires --proposals-from")
 
     os.makedirs(args.out, exist_ok=True)
     print(f"[lnpsam] Step 1: Cleanup -> {os.path.join(args.out, 'cleanup')}")
@@ -382,17 +479,22 @@ def main(argv=None):
     print("[lnpsam] Step 3: Graph")
     print(f"[lnpsam] Step 4: Resolve -> {os.path.join(args.out, 'resolve')}")
     print(f"[lnpsam] Step 6: Measure -> {os.path.join(args.out, 'measure')}")
-    run_cleanup_stage(
-        args.manifest,
-        args.config,
-        args.out,
-        run_step2=True,
-        run_step3=True,
-        run_step4=True,
-        run_step6=True,
-        device=args.device,
-        proposals_from=args.proposals_from,
-    )
+    try:
+        run_cleanup_stage(
+            args.manifest,
+            args.config,
+            args.out,
+            run_step2=True,
+            run_step3=True,
+            run_step4=True,
+            run_step6=True,
+            device=args.device,
+            proposals_from=args.proposals_from,
+            allow_stale_proposals=args.allow_stale_proposals,
+        )
+    except proposals_mod.StaleProposalsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None
     print(
         f"[lnpsam] Done: {os.path.join(args.out, 'particles_all.csv')}, "
         f"{os.path.join(args.out, 'panels_all.csv')}. Deferred step: "

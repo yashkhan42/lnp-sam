@@ -9,7 +9,9 @@ numbered section, that section is named. All new thresholds live in `config.yaml
 
 **Scope of this revision.** v2 (§1–9 below): Step 1 (Cleanup, §5) only. v3 (§10–13):
 Step 4 (Resolve, §8), the golden-set scope (§1, §12), the deferral of Step 5 (§9) and
-the Step-6 output details (§10).
+the Step-6 output details (§10). v5 (§14): Step-2 cache portability, validated reuse,
+provenance and timing (§4.2, §4.5, §6.4), following the main spec's v4 aggregate-parent
+revision.
 
 ---
 
@@ -450,4 +452,34 @@ pixels (calibration scored separately), and the existing `04_npsam_hpc/base` exp
 readable but lossy: overlapping masks were flattened into one label image (e.g.
 lievonen panel03: 186 masks → 179 labels) and `PPS` was not set to 64. Re-running the
 baseline with `npsam_run.py` gives the spec's baseline exactly.
+
+## 14. Step-2 cache portability and validated reuse (changes §4.2, §4.5, §6)
+
+**Revision v5.** Step-2 nodes remain unchanged; the cache identity, reuse checks and
+metadata change so HPC proposals can be copied safely to the Mac or another client.
+
+| # | Problem | Effect |
+|---|---|---|
+| F1 | The cache key used the checkpoint path and modification time, device, installed segment-anything version and the bytes of `proposals.py` | Identical image, model and settings produced different keys across machines; clients without SAM could not compute the same identity |
+| F2 | `--proposals-from` loaded nodes without checking the key and selected the alphabetically first path | Later steps could silently use a different crop, exclusion mask, SAM configuration or run |
+| F3 | Metadata lacked environment details and timing | A CPU run could not be attributed to its hardware or software, or compared by processing time |
+
+| Item | Choice | Why |
+|---|---|---|
+| Portable key | Key schema 2; hash the four Step-1 arrays, content box/crop offset, SAM parameters excluding checkpoint fields, actual `checkpoint_sha256` and `STEP2_VERSION` using canonical JSON | These inputs determine Step-2 output; checkpoint location, device and software versions are metadata only, allowing clients without SAM or a local checkpoint to validate reuse |
+| Checkpoint identity | Require a 64-character hexadecimal `sam.checkpoint_sha256`, normalized to lowercase; verify the actual file before loading SAM | The key names model contents and a wrong file cannot silently run under that identity. Yash supplied the actual TTU HPC measurement on 2026-10-12: `ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912` for `/lustre/work/tkhanyas/weights/sam_vit_b_01ec64.pth` |
+| Output version | Start `STEP2_VERSION` at 1; bump for any SAM call, post-processing, feature or RLE change that can alter nodes for the same inputs; keep a pinned output fingerprint test | Documentation or metadata changes do not invalidate correct output; output changes require an explicit version decision |
+| Validated reuse | After local Step 1, compare every candidate's metadata with the expected key; select the newest `created_utc` among matching candidates and print the source | Selects the correct run and catches changed cleanup arrays, geometry, settings, model contents or Step-2 version |
+| Stale proposals | Stop with the panel, candidate paths and differing inputs (`StaleProposalsError`, CLI exit 2); `--allow-stale-proposals` permits exactly one unmatched candidate, marks it unvalidated and prints `WARNING:`. Several unmatched candidates require pointing at a single run; the flag requires `--proposals-from` | Stale reuse remains an explicit choice, and the override cannot silently choose between incompatible runs |
+| Metadata | Store `panel_id`, schema/key, Step-2 version, all eight input digests, resolved checkpoint path, device, raw-mask/node counts, UTC creation time, `provenance` and `timing` | Makes validation explainable and preserves how and when the source proposals were made |
+| Provenance | Device and accelerator, CPU count, torch threads, torch/segment-anything/Python/OS versions, package version and short git commit (with `+dirty`). Failures become `null`; missing segment-anything is `"missing"`; no hostname or username | Hardware and software can be compared without making optional environment collection a cause of run failure |
+| Timing | Factory/model loading, generation and post-processing seconds, plus their sum; performance clock, 3 decimal places; record only on a miss and preserve source metadata on a hit | Measures the work that generated the proposals, including near-zero model loading after the first panel |
+| Summary columns | Add `proposals_validated`, `proposals_source`, `step2_seconds` to `proposals_all.csv`; on reuse, carry the source metadata's device | Each panel records whether it was checked, where its proposals came from and their original processing time |
+
+**Cache migration.** This supersedes §13's note, "`proposals.py` untouched, so the HPC
+proposal cache stays valid": every existing cache misses once after this change
+because it lacks `key_schema: 2`. Rerun Step 2 on the HPC to generate portable,
+validated caches, then reuse those runs locally. Existing run folders remain readable
+as results; legacy proposal reuse is refused unless explicitly requested with
+`--allow-stale-proposals` against a single run.
 

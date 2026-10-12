@@ -10,6 +10,8 @@
 
 **Revision v4 (aggregate parents).** Section 8.4 lets a hole in the background mask act as an aggregate parent. On the tracking panel `p05_x46__panel00`, SAM never proposes a whole-cluster mask, so C-AGG had no parent and the cluster was never an aggregate. The cluster is, however, traced exactly by a hole in the unfilled `bg_candidate` mask (19,934 px). Such holes become virtual nodes typed by C-AGG alone. No existing rule or threshold changes, and `resolve.synth_parents: false` restores v3 exactly.
 
+**Revision v5 (Step-2 cache portability and validated reuse).** Sections 4.2, 4.5 and 6.4 identify proposals by the actual Step-1 inputs, SAM parameters, checkpoint contents and Step-2 version, so the same work can be reused across machines. Reuse checks those inputs and records its source; new proposals record hardware, software and timing. Step-2 node output is unchanged. Legacy caches miss once and must be regenerated for validated reuse; amendments §14 records the choices.
+
 ## 1. Scope
 
 | In the MVP | Not in the MVP (later) |
@@ -82,7 +84,7 @@ lnpsam/
 
 Run: `python -m lnpsam.run --manifest data/manifest.csv --config config.yaml --out runs/<name>`
 
-SAM (Step 2) runs on the HPC. To rerun Steps 1, 3, 4 and 6 elsewhere on existing proposals, add `--proposals-from <dir>`: each panel's `proposals/<panel_id>__nodes.parquet` under `<dir>` is loaded as-is and SAM is never loaded (v3).
+SAM (Step 2) runs on the HPC. To rerun Steps 1, 3, 4 and 6 elsewhere on existing proposals, add `--proposals-from <dir>`: each panel's `proposals/<panel_id>__nodes.parquet` under `<dir>` is reused only if its cache key matches what the local Step 1 and `config.yaml` would produce; otherwise the run stops with the differing inputs (v5, §6.4). If several candidates match, use the newest `created_utc` and print the selected path. `--allow-stale-proposals` permits reuse of exactly one unmatched candidate with a warning; when several unmatched candidates exist, point `<dir>` at a single run. This flag requires `--proposals-from`. SAM is never loaded for proposal reuse, and the key can be computed without SAM installed or a local checkpoint file.
 
 ### 4.3 Input manifest (`data/manifest.csv`)
 
@@ -152,6 +154,7 @@ cleanup:
 
 sam:
   checkpoint: sam_vit_b_01ec64.pth
+  checkpoint_sha256: ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912   # measured on TTU HPC; identifies the model in the cache key
   points_per_side: 64
   points_per_batch: 128
   pred_iou_thresh: 0.80       # NP-SAM: 0.88
@@ -283,6 +286,36 @@ The relaxed thresholds are deliberate: they let the outer mask of thin-shell par
 | `mean_int` | Mean `gray` inside |
 | `edge_contrast` | `G = \|sobel(gaussian(gray, 1))\|`; mean of `G` on the mask boundary (`find_boundaries(mode="inner")`) ÷ 95th percentile of `G` over `content_mask` |
 | `quality` | `0.5·predicted_iou + 0.3·stability_score + 0.2·min(edge_contrast, 1)` |
+
+### 6.4 Step-2 cache
+
+Each panel stores `proposals/<panel_id>__nodes.parquet` with sibling `__meta.json`. The portable key is SHA-256 of canonical JSON (`sort_keys=True`, separators `(",", ":")`) containing `key_schema: 2` and the input digests:
+
+| Input | In key? | Note |
+|---|---|---|
+| `gray` (float32), `sam_image`, `exclusion` (uint8), `content_mask` (uint8) | Yes | Each array digest includes its name, shape, dtype and bytes |
+| `content_box`, `crop_offset` | Yes | Combined into the `geometry` digest |
+| `sam:` params except `checkpoint` and `checkpoint_sha256` | Yes | Combined into the `step2_params` digest |
+| `checkpoint_sha256` | Yes | Identifies checkpoint contents instead of path, size or modification time |
+| `STEP2_VERSION` | Yes | Explicit output version instead of the source file's hash |
+| Checkpoint path | No | Metadata only; may differ across machines |
+| Device | No | Metadata only |
+| torch / segment-anything versions | No | Metadata only; reuse clients need not have SAM installed |
+
+`sam.checkpoint_sha256` must be 64 hexadecimal characters; uppercase is normalized to lowercase. The configured value above was supplied by Yash on 2026-10-12 from `sha256sum /lustre/work/tkhanyas/weights/sam_vit_b_01ec64.pth` on TTU HPC. For another checkpoint, compute its hash with `sha256sum <checkpoint>` on Linux or `shasum -a 256 <checkpoint>` on macOS. When SAM is loaded, hash the actual local checkpoint in 1 MiB chunks and reject a mismatch before loading the model. `sam.checkpoint` still selects the file on that machine.
+
+The metadata records `panel_id`, `key_schema`, `cache_key`, `step2_version`, `input_digests` (the eight entries `gray`, `sam_image`, `exclusion`, `content_mask`, `geometry`, `step2_params`, `checkpoint_sha256`, `step2_version`), resolved `checkpoint_path`, `device`, `n_raw_masks`, `n_nodes`, UTC `created_utc`, `provenance` and `timing`.
+
+| Metadata group | Fields and meaning |
+|---|---|
+| `provenance` | `device`, `accelerator` (CUDA device name, `Apple MPS`, or CPU processor/machine), `cpu_count`, `torch_threads`, `torch`, `segment_anything`, `python`, `os`, `lnpsam_version`, `git_commit` (short commit plus `+dirty` for uncommitted changes). Missing segment-anything is `"missing"`; other unavailable fields are `null`. Collection never prevents a run, and includes no hostname or username. |
+| `timing` | `model_load_s` (generator factory call), `generate_s`, `postprocess_s`, `total_s` (their sum), in seconds from a monotonic performance clock rounded to 3 decimals. Recorded only on a cache miss; a cache hit returns the original metadata unchanged. |
+
+`STEP2_VERSION = 1` is independent of the package version (`lnpsam.__version__ = "0.1.0"`). Bump `STEP2_VERSION` whenever the same inputs could produce different Step-2 nodes: SAM calls, post-processing, feature computation or RLE encoding. The pinned `test_step2_output_fingerprint` verifies the node output and must be updated with an intentional version bump.
+
+Local cache loading checks the key schema, key, required columns and node count. Legacy caches without `key_schema` miss and recompute. External reuse computes the expected key after local cleanup, selects a matching candidate, and reports `StaleProposalsError` with the panel, candidate paths and differing digests when none match (CLI exit 2). Missing metadata and legacy schemas are reported explicitly. Old run folders remain readable as results; reusing legacy proposals requires `--allow-stale-proposals` until Step 2 is regenerated.
+
+`proposals_all.csv` records `proposals_validated` (True for local Step-2 runs or matching reuse, False for stale reuse), `proposals_source` (the nodes path), and `step2_seconds` (`timing.total_s`, empty when absent). Reused rows take `device` from the source metadata.
 
 ## 7. Step 3: Graph
 

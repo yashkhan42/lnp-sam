@@ -13,6 +13,10 @@ import importlib.metadata
 import json
 import math
 import os
+import platform
+import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +30,17 @@ from . import io as lnp_io
 
 
 _EIGHT_CONNECTED = np.ones((3, 3), dtype=np.uint8)
+
+# Bump when Step-2 output can change for the same inputs (SAM call, post-processing,
+# features, RLE encoding). test_step2_output_fingerprint fails if you forget.
+STEP2_VERSION = 1
+_KEY_SCHEMA = 2  # Legacy caches have no key_schema.
+_UNKEYED_SAM_FIELDS = frozenset({"checkpoint", "checkpoint_sha256"})
+
+
+class StaleProposalsError(RuntimeError):
+    """Saved proposals do not match the current panel's Step-2 inputs."""
+
 
 _CACHE_COLUMNS = (
     "node_id",
@@ -92,14 +107,15 @@ def select_device(requested="auto", torch_module=None):
     raise ValueError("device must be 'auto', 'cpu', 'mps', 'cuda', or 'cuda:<index>'")
 
 
-def load_sam_model(checkpoint, device):
-    """Load the spec-mandated SAM ViT-B checkpoint on ``device``."""
+def load_sam_model(checkpoint, device, expected_sha256):
+    """Verify and load the spec-mandated SAM ViT-B checkpoint on ``device``."""
     checkpoint = os.path.abspath(os.path.expanduser(os.fspath(checkpoint)))
     if not os.path.isfile(checkpoint):
         raise FileNotFoundError(
             f"SAM ViT-B checkpoint not found: {checkpoint}. "
             "Set sam.checkpoint in config.yaml to the HPC checkpoint path."
         )
+    verify_checkpoint(checkpoint, expected_sha256)
     try:
         from segment_anything import sam_model_registry
     except ImportError as exc:  # pragma: no cover - installation is environment-specific
@@ -387,52 +403,131 @@ def _hash_array(digest, name, array):
     digest.update(memoryview(array).cast("B"))
 
 
-def _checkpoint_identity(checkpoint):
-    """Return the checkpoint identity used in proposal-cache invalidation."""
-    path = Path(checkpoint).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"SAM ViT-B checkpoint not found: {path}. "
-            "Set sam.checkpoint in config.yaml to the HPC checkpoint path."
+def _require_checkpoint_sha256(sam_config) -> str:
+    """Validate the configured model identity without opening any model file."""
+    value = sam_config.get("checkpoint_sha256")
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdefABCDEF" for char in value)
+    ):
+        raise ValueError(
+            "sam.checkpoint_sha256 must contain exactly 64 hexadecimal characters. "
+            "Compute it with sha256sum <file> on Linux or shasum -a 256 <file> "
+            "on macOS, then put the hash in config.yaml."
         )
-    stat = path.stat()
-    return {
-        "path": str(path),
-        "size": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-    }
+    return value.lower()
 
 
-def proposal_cache_key(gray, cleanup_result, sam_config, checkpoint, device):
-    """Hash every input that can affect Step 2.
-
-    The key covers the source pixels, all Step-1 products consumed by Step 2,
-    SAM settings, checkpoint identity, resolved device, installed SAM version,
-    and this module's source. Consequently a cache hit means SAM and proposal
-    post-processing have no changed inputs.
-    """
-    checkpoint_identity = _checkpoint_identity(checkpoint)
-    try:
-        sam_version = importlib.metadata.version("segment-anything")
-    except importlib.metadata.PackageNotFoundError:
-        sam_version = "missing"
-
+def verify_checkpoint(path, expected_sha256):
+    """Check the actual model bytes against the configured portable identity."""
+    expected_sha256 = _require_checkpoint_sha256({"checkpoint_sha256": expected_sha256})
+    path = Path(path).expanduser().resolve()
     digest = hashlib.sha256()
-    _hash_array(digest, "gray", np.asarray(gray, dtype=np.float32))
-    _hash_array(digest, "sam_image", cleanup_result.sam_image)
-    _hash_array(digest, "exclusion", np.asarray(cleanup_result.exclusion, dtype=np.uint8))
-    _hash_array(digest, "content_mask", np.asarray(cleanup_result.content_mask, dtype=np.uint8))
-    metadata = {
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"SAM checkpoint SHA-256 mismatch for {path}: "
+            f"expected {expected_sha256}, actual {actual_sha256}"
+        )
+
+
+def _json_sha256(value):
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def proposal_input_digests(gray, cleanup_result, sam_config) -> dict[str, str]:
+    """Fingerprint each consumed input, independently of the compute machine."""
+    checkpoint_sha256 = _require_checkpoint_sha256(sam_config)
+    arrays = {
+        "gray": np.asarray(gray, dtype=np.float32),
+        "sam_image": cleanup_result.sam_image,
+        "exclusion": np.asarray(cleanup_result.exclusion, dtype=np.uint8),
+        "content_mask": np.asarray(cleanup_result.content_mask, dtype=np.uint8),
+    }
+    digests = {}
+    for name, array in arrays.items():
+        digest = hashlib.sha256()
+        _hash_array(digest, name, array)
+        digests[name] = digest.hexdigest()
+    digests["geometry"] = _json_sha256({
         "content_box": list(cleanup_result.content_box),
         "crop_offset": list(cleanup_result.crop_offset),
-        "sam_config": sam_config,
-        "checkpoint": checkpoint_identity,
-        "device": device,
-        "segment_anything": sam_version,
-        "implementation_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    })
+    digests["step2_params"] = _json_sha256({
+        key: value for key, value in sam_config.items() if key not in _UNKEYED_SAM_FIELDS
+    })
+    digests["checkpoint_sha256"] = checkpoint_sha256
+    digests["step2_version"] = str(STEP2_VERSION)
+    return digests
+
+
+def proposal_cache_key(gray, cleanup_result, sam_config) -> str:
+    """Identify Step-2 work without model paths, devices or installed libraries."""
+    digests = proposal_input_digests(gray, cleanup_result, sam_config)
+    return _json_sha256({"key_schema": _KEY_SCHEMA, **digests})
+
+
+def _collect_provenance(device) -> dict:
+    """Best-effort generation environment; each unavailable field is null."""
+    def safely(collect):
+        try:
+            return collect()
+        except Exception:
+            return None
+
+    def get_torch():
+        import torch
+        return torch
+
+    torch_module = safely(get_torch)
+
+    def accelerator():
+        if device.startswith("cuda"):
+            index = int(device.split(":", 1)[1]) if ":" in device else None
+            return torch_module.cuda.get_device_name(index)
+        if device == "mps":
+            return "Apple MPS"
+        return platform.processor() or platform.machine()
+
+    def sam_version():
+        try:
+            return importlib.metadata.version("segment-anything")
+        except importlib.metadata.PackageNotFoundError:
+            return "missing"
+
+    def package_version():
+        from . import __version__
+        return __version__
+
+    def git_commit():
+        options = {
+            "cwd": Path(__file__).resolve().parent,
+            "capture_output": True,
+            "text": True,
+            "check": True,
+            "timeout": 2,
+        }
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], **options).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], **options).stdout.strip()
+        return commit + ("+dirty" if dirty else "") if commit else None
+
+    return {
+        "device": safely(lambda: device),
+        "accelerator": safely(accelerator),
+        "cpu_count": safely(lambda: os.cpu_count()),
+        "torch_threads": safely(lambda: torch_module.get_num_threads()),
+        "torch": safely(lambda: str(torch_module.__version__)),
+        "segment_anything": safely(sam_version),
+        "python": safely(lambda: platform.python_version()),
+        "os": safely(lambda: platform.platform()),
+        "lnpsam_version": safely(package_version),
+        "git_commit": safely(git_commit),
     }
-    digest.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    return digest.hexdigest(), checkpoint_identity
 
 
 def _node_to_cache_record(node):
@@ -525,6 +620,8 @@ def load_proposal_cache(cache_dir, panel_id, expected_key):
     try:
         with meta_path.open("r") as stream:
             metadata = json.load(stream)
+        if not isinstance(metadata, dict) or metadata.get("key_schema") != _KEY_SCHEMA:
+            return None
         if metadata.get("cache_key") != expected_key:
             return None
         frame = pd.read_parquet(nodes_path)
@@ -533,7 +630,7 @@ def load_proposal_cache(cache_dir, panel_id, expected_key):
         if len(frame) != int(metadata["n_nodes"]):
             return None
         nodes = [_cache_record_to_node(row) for row in frame.to_dict(orient="records")]
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError):
         return None
     return nodes, metadata
 
@@ -542,10 +639,13 @@ def save_proposal_cache(
     cache_dir,
     panel_id,
     cache_key,
-    checkpoint_identity,
+    input_digests,
+    checkpoint_path,
     device,
     nodes,
     raw_count,
+    provenance=None,
+    timing=None,
 ):
     """Atomically save one panel's Step-2 nodes and cache metadata."""
     nodes_path, meta_path = proposal_cache_paths(cache_dir, panel_id)
@@ -555,11 +655,18 @@ def save_proposal_cache(
     )
     metadata = {
         "panel_id": panel_id,
+        "key_schema": _KEY_SCHEMA,
         "cache_key": cache_key,
-        "checkpoint": checkpoint_identity,
+        "step2_version": STEP2_VERSION,
+        "input_digests": input_digests,
+        "checkpoint_path": str(Path(checkpoint_path).expanduser().resolve())
+        if checkpoint_path is not None else None,
         "device": device,
         "n_raw_masks": int(raw_count),
         "n_nodes": int(len(nodes)),
+        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "provenance": _collect_provenance(device) if provenance is None else provenance,
+        "timing": timing,
     }
 
     nodes_tmp = nodes_path.with_suffix(nodes_path.suffix + ".tmp")
@@ -584,7 +691,6 @@ def run_proposals_cached(
     cfg,
     panel_id,
     cache_dir,
-    checkpoint,
     device,
     mask_generator_factory,
 ):
@@ -594,16 +700,18 @@ def run_proposals_cached(
     to avoid loading the checkpoint when every panel is already cached.
     Returns ``(nodes, cache_hit, metadata)``.
     """
-    cache_key, checkpoint_identity = proposal_cache_key(
-        gray, cleanup_result, cfg["sam"], checkpoint, device
-    )
+    input_digests = proposal_input_digests(gray, cleanup_result, cfg["sam"])
+    cache_key = _json_sha256({"key_schema": _KEY_SCHEMA, **input_digests})
     cached = load_proposal_cache(cache_dir, panel_id, cache_key)
     if cached is not None:
         nodes, metadata = cached
         return nodes, True, metadata
 
+    started = time.perf_counter()
     mask_generator = mask_generator_factory()
+    loaded = time.perf_counter()
     annotations = mask_generator.generate(cleanup_result.sam_image)
+    generated = time.perf_counter()
     nodes = postprocess_proposals(
         annotations=annotations,
         gray=gray,
@@ -613,14 +721,23 @@ def run_proposals_cached(
         crop_offset=cleanup_result.crop_offset,
         sam_config=cfg["sam"],
     )
+    postprocessed = time.perf_counter()
+    timing = {
+        "model_load_s": round(loaded - started, 3),
+        "generate_s": round(generated - loaded, 3),
+        "postprocess_s": round(postprocessed - generated, 3),
+        "total_s": round(postprocessed - started, 3),
+    }
     metadata = save_proposal_cache(
         cache_dir=cache_dir,
         panel_id=panel_id,
         cache_key=cache_key,
-        checkpoint_identity=checkpoint_identity,
+        input_digests=input_digests,
+        checkpoint_path=cfg["sam"].get("checkpoint"),
         device=device,
         nodes=nodes,
         raw_count=len(annotations),
+        timing=timing,
     )
     return nodes, False, metadata
 
