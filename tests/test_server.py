@@ -158,3 +158,18 @@ def test_failures_are_reported_and_unready_result_is_conflict(tmp_path):
         assert record["state"] == "failed"
         assert record["error"] == "Image sample failed during measurement."
         assert client.get(f"/jobs/{job_id}/result", headers=AUTH).status_code == 409
+
+
+def test_real_server_loads_pipeline_before_accepting_requests(tmp_path, monkeypatch):
+    from lnpsam import app_runtime, proposals, server
+
+    calls = []
+    monkeypatch.setattr(app_runtime, "check_local_setup", lambda *args, **kwargs: calls.append("check model"))
+    monkeypatch.setattr(proposals, "select_device", lambda requested: calls.append("device") or "cpu")
+    monkeypatch.setattr(server, "_warm_up", lambda: calls.append("warm up"))
+    config = tmp_path / "config.yaml"
+    config.write_text("sam:\n  checkpoint: model.pth\n  checkpoint_sha256: " + "a" * 64 + "\n")
+    app = create_app("test-access-token", config_path=config, jobs_root=tmp_path / "jobs")
+    with TestClient(app) as client:
+        assert calls == ["check model", "device", "warm up"]
+        assert client.get("/info", headers=AUTH).json()["device"] == "cpu"

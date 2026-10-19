@@ -311,3 +311,105 @@ def test_cancellation_during_result_retrieval_leaves_no_partial_results(tmp_path
             [image], "TEM", None, destination, cancel_event=event)
     assert [path.name for path in destination.iterdir()] == ["manifest.csv"]
     assert calls[-1] == "DELETE"
+
+
+def _results_zip():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("particles_all.csv", "panel_id,particle_id\nsample,1\n")
+        archive.writestr("panels_all.csv", "panel_id,n_particles\nsample,1\n")
+        archive.writestr("run_info.json", "{}")
+        archive.writestr("measure/sample__overlay.png", b"overlay")
+    return buffer.getvalue()
+
+
+class _FlakyServer:
+    """A fake session whose status checks fail ``failures`` times (forever if None)."""
+
+    def __init__(self, failures, error=requests.ReadTimeout, delete_error=None):
+        self.failures = failures
+        self.error = error
+        self.delete_error = delete_error
+        self.calls = []
+        self.polls = 0
+
+    def request(self, method, url, **kwargs):
+        self.calls.append(method)
+        archive = _results_zip()
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, record=None):
+                self.record = record
+
+            def json(self):
+                return self.record
+
+            def close(self):
+                pass
+
+            def iter_content(self, chunk_size):
+                yield archive
+
+        if method == "POST":
+            return Response({"job_id": "test-job"})
+        if method == "DELETE":
+            if self.delete_error:
+                raise self.delete_error("Still unreachable")
+            return Response({"state": "cancelled"})
+        if url.endswith("/result"):
+            return Response()
+        self.polls += 1
+        if self.failures is None or self.polls <= self.failures:
+            raise self.error("Read timed out")
+        if self.polls == self.failures + 1:
+            return Response({"state": "running", "progress": {"image_index": 1, "n_images": 1,
+                                                              "panel_id": "sample", "stage": "proposals"}})
+        return Response({"state": "done", "progress": {"image_index": 1, "n_images": 1,
+                                                        "panel_id": "sample", "stage": "measure"}})
+
+
+@pytest.mark.parametrize("error", [requests.ReadTimeout, requests.ConnectionError])
+def test_slow_status_checks_are_retried_without_cancelling_the_job(tmp_path, error):
+    session = _FlakyServer(failures=3, error=error)
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"image")
+    statuses, progress = [], []
+    destination = RemoteClient("http://test-server", "secret", session=session, poll_interval=0.01).run(
+        [image], "TEM", None, tmp_path / "output", status=statuses.append,
+        progress=lambda *value: progress.append(value))
+    assert (destination / "particles_all.csv").is_file()
+    assert "DELETE" not in session.calls
+    assert statuses.count("Server not responding · retrying…") == 1
+    # After recovery the stage is reported again so the GUI replaces the retry message.
+    assert progress[0] == (1, 1, "sample", "proposals")
+    assert progress[-1] == (1, 1, "sample", "measure")
+
+
+def test_status_checks_give_up_after_the_grace_period_and_cancel(tmp_path):
+    session = _FlakyServer(failures=None)
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"image")
+    with pytest.raises(RemoteError, match="Lost contact with the server for 1 minute"):
+        RemoteClient("http://test-server", "secret", session=session, poll_interval=0.01,
+                     poll_grace=0.05).run([image], "TEM", None, tmp_path / "output")
+    assert session.polls > 1
+    assert session.calls[-1] == "DELETE"
+
+
+def test_cancel_while_server_is_unreachable_is_reported_as_cancelled(tmp_path):
+    session = _FlakyServer(failures=None, error=requests.ConnectionError, delete_error=requests.ConnectionError)
+    event = threading.Event()
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"image")
+    statuses = []
+
+    def status(text):
+        statuses.append(text)
+        if text.startswith("Server not responding"):
+            event.set()
+
+    with pytest.raises(app_runtime.RunCancelled):
+        RemoteClient("http://test-server", "secret", session=session, poll_interval=0.01).run(
+            [image], "TEM", None, tmp_path / "output", status=status, cancel_event=event)

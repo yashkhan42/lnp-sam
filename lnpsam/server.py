@@ -23,6 +23,18 @@ RETENTION_SECONDS = 24 * 60 * 60
 _ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 
+def _warm_up():
+    """Load the pipeline and the OCR models before the server accepts jobs.
+
+    Jobs run in a thread of the server process. Loading these libraries inside
+    a job can hold the interpreter long enough that status requests time out,
+    so the first job on a fresh server would look unreachable.
+    """
+    from . import cleanup, run  # noqa: F401  (run imports the remaining stages)
+
+    cleanup.get_reader()
+
+
 class _UploadTooLarge(RuntimeError):
     pass
 
@@ -261,6 +273,7 @@ def create_app(
             from .proposals import select_device
 
             jobs.device = select_device(device)
+            _warm_up()
             jobs.runner = run_local
             app.state.identity = {**app_identity(config_path, checkpoint), "device": jobs.device}
         else:

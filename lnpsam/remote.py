@@ -8,16 +8,25 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from urllib.parse import urlsplit
 import zipfile
 
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 MAX_RESULT_BYTES = 4 * 1024 * 1024 * 1024
+# How long a running job's status checks may keep failing before the app
+# gives up. A busy server (e.g. loading models) or a brief network drop
+# should not cost the user their run.
+POLL_GRACE_SECONDS = 5 * 60
 
 
 class RemoteError(RuntimeError):
     """A connection or server failure suitable for display in the GUI."""
+
+
+class _Unreachable(RemoteError):
+    """A transient failure: no connection, a timeout, or a gateway error."""
 
 
 def _cancelled():
@@ -83,7 +92,8 @@ def _extract_results(archive: Path, destination: Path, cancel_event=None) -> Non
 class RemoteClient:
     """Upload, monitor and retrieve one run. Call from a worker thread."""
 
-    def __init__(self, address: str, token: str, *, session=None, poll_interval: float = 1.0):
+    def __init__(self, address: str, token: str, *, session=None, poll_interval: float = 1.0,
+                 poll_grace: float = POLL_GRACE_SECONDS):
         parsed = urlsplit(address.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
             raise RemoteError("Enter a server address such as http://localhost:8765.")
@@ -94,6 +104,7 @@ class RemoteClient:
         self.address = address.strip().rstrip("/")
         self._token = token
         self.poll_interval = max(0.01, poll_interval)
+        self.poll_grace = max(0.0, poll_grace)
         if session is None:
             import requests
 
@@ -112,10 +123,13 @@ class RemoteClient:
             )
         except requests.RequestException:
             # Do not expose a requests traceback containing request headers.
-            raise RemoteError("Can't reach the server.") from None
+            raise _Unreachable("Can't reach the server.") from None
         if response.status_code == 401:
             response.close()
             raise RemoteError("The server rejected the token.")
+        if response.status_code in (502, 503, 504):
+            response.close()
+            raise _Unreachable("Can't reach the server.")
         if response.status_code == 413:
             response.close()
             raise RemoteError("Uploads are limited to 200 MB. Remove some images and try again.")
@@ -176,11 +190,36 @@ class RemoteClient:
                 raise RemoteError("The server returned an invalid job identifier.")
             previous_progress = None
             previous_status = None
+            unreachable_since = None
             while True:
                 if event.is_set():
-                    self.cancel(job_id)
+                    try:
+                        self.cancel(job_id)
+                    except RemoteError:
+                        pass  # Still report a cancellation; the server expires the job.
                     raise _cancelled()
-                job = self._json("GET", f"/jobs/{job_id}")
+                try:
+                    job = self._json("GET", f"/jobs/{job_id}")
+                except _Unreachable:
+                    # The job keeps running on the server; keep checking for a while.
+                    now = time.monotonic()
+                    if unreachable_since is None:
+                        unreachable_since = now
+                    if now - unreachable_since >= self.poll_grace:
+                        minutes = max(1, round(self.poll_grace / 60))
+                        raise RemoteError(
+                            f"Lost contact with the server for {minutes} "
+                            f"minute{'s' if minutes != 1 else ''}. Check the connection and run again."
+                        ) from None
+                    text = "Server not responding · retrying…"
+                    if status and text != previous_status:
+                        status(text)
+                        previous_status = text
+                    # Re-send the stage on recovery so the GUI replaces this message.
+                    previous_progress = None
+                    event.wait(self.poll_interval)
+                    continue
+                unreachable_since = None
                 state = job.get("state")
                 latest = job.get("progress")
                 if latest and progress:

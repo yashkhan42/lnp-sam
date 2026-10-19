@@ -3,12 +3,30 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.env
 
-# Run outputs
+# Run outputs (regenerate with the pipeline / HPC jobs)
 runs/
+04_npsam_hpc/
 
-# SAM checkpoint (large; download separately per spec 4.1)
-sam_vit_b_01ec64.pth
+# Model weights (large; download separately per spec 4.1)
+*.pth
+
+# Third-party material (journal figure panels, papers): copyrighted, not ours to redistribute
+02_panels/
+chemrxiv-2023-k73qz-v2.pdf
+
+# Unpublished lab SEM data
+lab_generated_sem/
+data/manifest_lab_sem.csv
+
+# Internal spec / planning docs
+*_SPEC*.md
 
 # OS
 .DS_Store
+
+# Personal TTU HPCC tooling (eRaider username, cluster paths)
+hpc/
+hpc_check.py
